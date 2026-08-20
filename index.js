@@ -1185,6 +1185,28 @@ function verificationCode() {
     ),
   );
 }
+  // No I, O, 0 or 1.
+  // Makes the captcha less annoying to read.
+  const characters =
+    'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+  let code = '';
+
+  for (
+    let index = 0;
+    index < CONFIG.VERIFICATION.CODE_LENGTH;
+    index++
+  ) {
+    code += characters[
+      randInt(
+        0,
+        characters.length - 1,
+      )
+    ];
+  }
+
+  return code;
+}
 
 function renderCaptcha(code) {
   const canvas = createCanvas(
@@ -1225,6 +1247,181 @@ function renderCaptcha(code) {
 
   return canvas.toBuffer(
     'image/png',
+  );
+}
+  // --------------------------------------------------------------------------
+  // BACKGROUND
+  // --------------------------------------------------------------------------
+
+  ctx.fillStyle = '#120707';
+
+  ctx.fillRect(
+    0,
+    0,
+    canvas.width,
+    canvas.height,
+  );
+
+  // --------------------------------------------------------------------------
+  // RANDOM RED/DARK LINES
+  // --------------------------------------------------------------------------
+
+  for (
+    let index = 0;
+    index < 35;
+    index++
+  ) {
+    ctx.strokeStyle =
+      `rgba(` +
+      `${randInt(80, 150)}, ` +
+      `${randInt(5, 30)}, ` +
+      `${randInt(5, 30)}, ` +
+      `0.35)`;
+
+    ctx.lineWidth =
+      randInt(
+        1,
+        4,
+      );
+
+    ctx.beginPath();
+
+    ctx.moveTo(
+      randInt(0, 700),
+      randInt(0, 220),
+    );
+
+    ctx.lineTo(
+      randInt(0, 700),
+      randInt(0, 220),
+    );
+
+    ctx.stroke();
+  }
+
+  // --------------------------------------------------------------------------
+  // CAPTCHA CHARACTERS
+  // --------------------------------------------------------------------------
+
+  ctx.textAlign = 'center';
+
+  ctx.textBaseline = 'middle';
+
+  for (
+    let index = 0;
+    index < code.length;
+    index++
+  ) {
+    ctx.save();
+
+    ctx.translate(
+      115 + index * 95,
+      110 + randInt(-18, 18),
+    );
+
+    ctx.rotate(
+      (
+        randInt(-18, 18) *
+        Math.PI
+      ) / 180,
+    );
+
+    ctx.font =
+      `bold ${randInt(58, 76)}px sans-serif`;
+
+    ctx.fillStyle =
+      index % 2 === 0
+        ? '#f2e9e9'
+        : '#b24b4b';
+
+    ctx.fillText(
+      code[index],
+      0,
+      0,
+    );
+
+    ctx.restore();
+  }
+
+  // --------------------------------------------------------------------------
+  // STATIC / NOISE
+  // --------------------------------------------------------------------------
+
+  for (
+    let index = 0;
+    index < 250;
+    index++
+  ) {
+    ctx.fillStyle =
+      `rgba(255,255,255,` +
+      `${Math.random() * 0.18})`;
+
+    ctx.fillRect(
+      randInt(0, 699),
+      randInt(0, 219),
+      randInt(1, 3),
+      randInt(1, 3),
+    );
+  }
+
+  return canvas.toBuffer(
+    'image/png',
+  );
+}
+
+async function completeVerification(
+  userId,
+) {
+  const guild =
+    await fetchGuild();
+
+  const member =
+    await guild.members
+      .fetch(userId)
+      .catch(() => null);
+
+  if (!member) {
+    throw new Error(
+      'Member is no longer in the server.',
+    );
+  }
+
+  // EXACT roles requested.
+  const verificationRoles = [
+    CONFIG.ROLES.MEMBER_TAG,
+    CONFIG.ROLES.MEMBER,
+    CONFIG.ROLES.MISC,
+  ];
+
+  await member.roles.add(
+    verificationRoles,
+  );
+
+  // Remove unverified/verify role.
+  if (
+    member.roles.cache.has(
+      CONFIG.ROLES.VERIFY,
+    )
+  ) {
+    await member.roles
+      .remove(
+        CONFIG.ROLES.VERIFY,
+      )
+      .catch(() => null);
+  }
+
+  // Ensure their XP database row exists.
+  sql.ensureUser.run(
+    member.id,
+  );
+
+  await sendWelcome(
+    member,
+  );
+
+  await logEvent(
+    'verification complete',
+    `${member.user.tag} (${member.id}) verified successfully.`,
   );
 }
 
@@ -1637,7 +1834,7 @@ function staffApplicationPanel() {
             ButtonStyle.Danger,
           )
           .setEmoji(
-            '📝',
+            '👑',
           ),
       );
 
