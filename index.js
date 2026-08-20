@@ -190,7 +190,7 @@ const CONFIG = {
   },
 
   VERIFICATION: {
-    CODE_LENGTH: 6,
+    CODE_LENGTH: 4,
     EXPIRE_MS: 10 * 60_000,
     MAX_ATTEMPTS: 5,
   },
@@ -1178,44 +1178,25 @@ async function updateMediaPosterRole(
 // ============================================================================
 
 function verificationCode() {
-  // No I, O, 0 or 1.
-  // Makes the captcha less annoying to read.
-  const characters =
-    'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-
-  let code = '';
-
-  for (
-    let index = 0;
-    index < CONFIG.VERIFICATION.CODE_LENGTH;
-    index++
-  ) {
-    code += characters[
-      randInt(
-        0,
-        characters.length - 1,
-      )
-    ];
-  }
-
-  return code;
+  return String(
+    randInt(
+      1000,
+      9999,
+    ),
+  );
 }
 
 function renderCaptcha(code) {
-  const canvas =
-    createCanvas(
-      700,
-      220,
-    );
+  const canvas = createCanvas(
+    700,
+    220,
+  );
 
   const ctx =
     canvas.getContext('2d');
 
-  // --------------------------------------------------------------------------
-  // BACKGROUND
-  // --------------------------------------------------------------------------
-
-  ctx.fillStyle = '#120707';
+  ctx.fillStyle =
+    '#120707';
 
   ctx.fillRect(
     0,
@@ -1224,166 +1205,26 @@ function renderCaptcha(code) {
     canvas.height,
   );
 
-  // --------------------------------------------------------------------------
-  // RANDOM RED/DARK LINES
-  // --------------------------------------------------------------------------
+  ctx.fillStyle =
+    '#ffffff';
 
-  for (
-    let index = 0;
-    index < 35;
-    index++
-  ) {
-    ctx.strokeStyle =
-      `rgba(` +
-      `${randInt(80, 150)}, ` +
-      `${randInt(5, 30)}, ` +
-      `${randInt(5, 30)}, ` +
-      `0.35)`;
+  ctx.font =
+    'bold 100px sans-serif';
 
-    ctx.lineWidth =
-      randInt(
-        1,
-        4,
-      );
+  ctx.textAlign =
+    'center';
 
-    ctx.beginPath();
+  ctx.textBaseline =
+    'middle';
 
-    ctx.moveTo(
-      randInt(0, 700),
-      randInt(0, 220),
-    );
-
-    ctx.lineTo(
-      randInt(0, 700),
-      randInt(0, 220),
-    );
-
-    ctx.stroke();
-  }
-
-  // --------------------------------------------------------------------------
-  // CAPTCHA CHARACTERS
-  // --------------------------------------------------------------------------
-
-  ctx.textAlign = 'center';
-
-  ctx.textBaseline = 'middle';
-
-  for (
-    let index = 0;
-    index < code.length;
-    index++
-  ) {
-    ctx.save();
-
-    ctx.translate(
-      115 + index * 95,
-      110 + randInt(-18, 18),
-    );
-
-    ctx.rotate(
-      (
-        randInt(-18, 18) *
-        Math.PI
-      ) / 180,
-    );
-
-    ctx.font =
-      `bold ${randInt(58, 76)}px sans-serif`;
-
-    ctx.fillStyle =
-      index % 2 === 0
-        ? '#f2e9e9'
-        : '#b24b4b';
-
-    ctx.fillText(
-      code[index],
-      0,
-      0,
-    );
-
-    ctx.restore();
-  }
-
-  // --------------------------------------------------------------------------
-  // STATIC / NOISE
-  // --------------------------------------------------------------------------
-
-  for (
-    let index = 0;
-    index < 250;
-    index++
-  ) {
-    ctx.fillStyle =
-      `rgba(255,255,255,` +
-      `${Math.random() * 0.18})`;
-
-    ctx.fillRect(
-      randInt(0, 699),
-      randInt(0, 219),
-      randInt(1, 3),
-      randInt(1, 3),
-    );
-  }
+  ctx.fillText(
+    code,
+    canvas.width / 2,
+    canvas.height / 2,
+  );
 
   return canvas.toBuffer(
     'image/png',
-  );
-}
-
-async function completeVerification(
-  userId,
-) {
-  const guild =
-    await fetchGuild();
-
-  const member =
-    await guild.members
-      .fetch(userId)
-      .catch(() => null);
-
-  if (!member) {
-    throw new Error(
-      'Member is no longer in the server.',
-    );
-  }
-
-  // EXACT roles requested.
-  const verificationRoles = [
-    CONFIG.ROLES.MEMBER_TAG,
-    CONFIG.ROLES.MEMBER,
-    CONFIG.ROLES.MISC,
-  ];
-
-  await member.roles.add(
-    verificationRoles,
-  );
-
-  // Remove unverified/verify role.
-  if (
-    member.roles.cache.has(
-      CONFIG.ROLES.VERIFY,
-    )
-  ) {
-    await member.roles
-      .remove(
-        CONFIG.ROLES.VERIFY,
-      )
-      .catch(() => null);
-  }
-
-  // Ensure their XP database row exists.
-  sql.ensureUser.run(
-    member.id,
-  );
-
-  await sendWelcome(
-    member,
-  );
-
-  await logEvent(
-    'verification complete',
-    `${member.user.tag} (${member.id}) verified successfully.`,
   );
 }
 
@@ -1548,7 +1389,7 @@ function ticketPanel() {
             ButtonStyle.Secondary,
           )
           .setEmoji(
-            '⌁',
+            '🛠️',
           ),
 
         new ButtonBuilder()
@@ -1562,7 +1403,7 @@ function ticketPanel() {
             ButtonStyle.Danger,
           )
           .setEmoji(
-            '†',
+            '👑',
           ),
       );
 
@@ -1796,7 +1637,7 @@ function staffApplicationPanel() {
             ButtonStyle.Danger,
           )
           .setEmoji(
-            '†',
+            '📝',
           ),
       );
 
@@ -3582,7 +3423,7 @@ async function createTicketChannel(
   const embed =
     baseEmbed()
       .setTitle(
-        `⌁ ${ticketTitle}`,
+        `🛠️ ${ticketTitle}`,
       )
       .setDescription(
         `${opener} opened this ticket.`,
@@ -7059,9 +6900,9 @@ async function handleVerifyButton(
           )
           .setDescription(
             [
-              'reply to this DM with the **6 characters** shown below.',
+              'reply to this DM with the **4 digits** shown below.',
               '',
-              'capitalisation does not matter.',
+              'type the number exactly as shown.',
               '',
               `expires in **${Math.floor(
                 CONFIG.VERIFICATION.EXPIRE_MS /
@@ -7314,7 +7155,7 @@ async function handleTicketButton(
       embeds: [
         baseEmbed()
           .setTitle(
-            '⌁ ticket closed',
+            '🛠️ ticket closed',
           )
           .setDescription(
             `closed by ${interaction.user}.`,
