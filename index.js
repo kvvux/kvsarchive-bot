@@ -251,8 +251,36 @@ const client = new Client({
 // DATABASE
 // ============================================================================
 
-const DB_PATH = process.env.DB_PATH || 'kvsarchive.sqlite';
-const db = new Database(DB_PATH);
+const fs = require('fs');
+const path = require('path');
+
+const DB_DIR =
+  process.env.RAILWAY_VOLUME_MOUNT_PATH ||
+  './data';
+
+fs.mkdirSync(DB_DIR, {
+  recursive: true,
+});
+
+const DB_PATH =
+  path.join(
+    DB_DIR,
+    'kvsarchive.sqlite',
+  );
+
+console.log(`[db] database path: ${DB_PATH}`);
+
+console.log(
+  `[db] Railway volume: ${
+    process.env.RAILWAY_VOLUME_MOUNT_PATH ||
+    'NOT MOUNTED'
+  }`,
+);
+
+const db =
+  new Database(
+    DB_PATH,
+  );
 
 db.pragma('journal_mode = WAL');
 
