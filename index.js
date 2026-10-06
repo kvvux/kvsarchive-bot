@@ -7924,8 +7924,8 @@ async function buildServerArchive(
     '# kvsarchive server archive',
     '',
     `Generated: ${data.generated_at}`,
-    `Guild: **${guild.name}** (`${guild.id}`)`,
-    `Owner: <@${guild.ownerId}> (`${guild.ownerId}`)`,
+    `Guild: **${guild.name}** — ID ${guild.id}`,
+    `Owner: <@${guild.ownerId}> — ID ${guild.ownerId}`,
     `Members: **${guild.memberCount}**`,
     '',
     '## Categories / channels',
@@ -7937,7 +7937,7 @@ async function buildServerArchive(
     of categories
   ) {
     md.push(
-      `### ${category.name} — `${category.id}``,
+      `### ${category.name} — ID ${category.id}`,
     );
 
     for (
@@ -7949,7 +7949,7 @@ async function buildServerArchive(
       )
     ) {
       md.push(
-        `- **${channel.name}** — ${channel.type} — `${channel.id}``,
+        `- **${channel.name}** — ${channel.type} — ID ${channel.id}`,
       );
     }
 
@@ -7968,7 +7968,7 @@ async function buildServerArchive(
       of uncategorized
     ) {
       md.push(
-        `- **${channel.name}** — ${channel.type} — `${channel.id}``,
+        `- **${channel.name}** — ${channel.type} — ID ${channel.id}`,
       );
     }
 
@@ -7985,7 +7985,7 @@ async function buildServerArchive(
     of roles
   ) {
     md.push(
-      `- **${role.name}** — `${role.id}` — position ${role.position} — members ${role.member_count}`,
+      `- **${role.name}** — ID ${role.id} — position ${role.position} — members ${role.member_count}`,
     );
   }
 
@@ -8000,7 +8000,7 @@ async function buildServerArchive(
     of bots
   ) {
     md.push(
-      `- **${bot.tag}** — `${bot.id}``,
+      `- **${bot.tag}** — ID ${bot.id}`,
     );
   }
 
