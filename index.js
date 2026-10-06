@@ -11622,6 +11622,37 @@ async function reconcilePersistentState(
           () =>
             null,
         );
+
+      if (
+        channel.name
+          .startsWith(
+            'closed-',
+          ) ||
+        channel.name
+          .startsWith(
+            'ai-closed-',
+          )
+      ) {
+        await channel.permissionOverwrites
+          .edit(
+            row.opener_id,
+            {
+              ViewChannel:
+                false,
+
+              SendMessages:
+                false,
+            },
+            {
+              reason:
+                'Closed ticket hidden from opener',
+            },
+          )
+          .catch(
+            () =>
+              null,
+          );
+      }
     }
   }
 
