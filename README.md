@@ -1,0 +1,52 @@
+# kvsarchive-bot
+
+Discord community bot for the **kvsarchive** server.
+
+## Stack
+
+- Node.js 20+
+- discord.js v14
+- better-sqlite3
+- Railway-compatible persistent storage
+- optional OpenAI API support
+
+## Start
+
+```bash
+npm install
+npm start
+```
+
+## Environment
+
+Required:
+- `DISCORD_TOKEN`
+
+Recommended:
+- `DB_PATH` or Railway `RAILWAY_VOLUME_MOUNT_PATH` for persistent SQLite storage
+
+Optional:
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+
+Do not commit secrets to the repository.
+
+## Important owner commands
+
+- `/setup` — posts official panels
+- `/doctor` — diagnoses bot/server configuration
+- `/archive-server` — exports the current live server structure and IDs
+- `/syncautoroles` — repairs verification autoroles
+- `/synclevelroles` — repairs level roles
+
+## Verification fallback
+
+The support/ticket panel is intentionally kept reachable before verification. Members who cannot complete DM verification can open **Verification Help** and staff can assist them.
+
+## Server map
+
+After structural changes, run `/archive-server` and keep the generated map as the current source of truth for category/channel/role IDs.
+
+## Development
+
+The current production bot is still largely implemented in `index.js`. Major refactors should preserve behaviour and database compatibility. See `KVSARCHIVE_CODEX_HANDOFF.md`.
