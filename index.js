@@ -58,6 +58,7 @@ const CONFIG = {
     ADMIN: '1539778556018823168',
     SR_MOD: '1539777299942211644',
     MOD: '1539775895810867320',
+    SUPPORT_TEAM: '1557102267549753465',
     ASCENDANT: '1539775373028626512',
     MANAGEMENT: '1539779210212548728',
 
@@ -195,6 +196,14 @@ const STAFF_ROLE_IDS = [
   CONFIG.ROLES.SR_MOD,
   CONFIG.ROLES.ADMIN,
   CONFIG.ROLES.ASCENDANT,
+  CONFIG.ROLES.MANAGEMENT,
+];
+
+const TICKET_STAFF_ROLE_IDS = [
+  CONFIG.ROLES.SUPPORT_TEAM,
+  CONFIG.ROLES.MOD,
+  CONFIG.ROLES.SR_MOD,
+  CONFIG.ROLES.ADMIN,
   CONFIG.ROLES.MANAGEMENT,
 ];
 
@@ -1359,6 +1368,56 @@ function isStaff(
       )
     ),
   );
+}
+
+function isTicketStaff(
+  member,
+) {
+  return Boolean(
+    member &&
+    (
+      isOwner(
+        member.id,
+      ) ||
+      hasAnyRole(
+        member,
+        TICKET_STAFF_ROLE_IDS,
+      )
+    ),
+  );
+}
+
+async function requireTicketStaff(
+  interaction,
+) {
+  const member =
+    await getInteractionMember(
+      interaction,
+    );
+
+  if (
+    member &&
+    isTicketStaff(
+      member,
+    )
+  ) {
+    return member;
+  }
+
+  await interaction.reply(
+    ephemeral({
+      embeds: [
+        errorEmbed(
+          'ticket support team only.',
+        ),
+      ],
+    }),
+  ).catch(
+    () =>
+      null,
+  );
+
+  return null;
 }
 
 function isManagement(
@@ -2929,6 +2988,7 @@ async function findTicketEscalationTarget(
 
   const candidates =
     [
+      CONFIG.ROLES.SUPPORT_TEAM,
       CONFIG.ROLES.MOD,
       CONFIG.ROLES.SR_MOD,
       CONFIG.ROLES.ADMIN,
@@ -3242,17 +3302,6 @@ function ticketReviewControls(
           .setStyle(
             ButtonStyle.Secondary,
           ),
-
-        new ButtonBuilder()
-          .setCustomId(
-            `ticketreview_escalate_${channelId}`,
-          )
-          .setLabel(
-            'Escalate',
-          )
-          .setStyle(
-            ButtonStyle.Danger,
-          ),
       ),
   ];
 }
@@ -3287,6 +3336,9 @@ async function closeTicketByAi(
     .edit(
       ticket.opener_id,
       {
+        ViewChannel:
+          false,
+
         SendMessages:
           false,
       },
@@ -3330,7 +3382,7 @@ async function closeTicketByAi(
           [
             `${opener}, this ticket was closed by AI because you requested it.`,
             '',
-            '**It has NOT been deleted.** A human staff member must review the transcript first.',
+            '**It has NOT been deleted.** A ticket helper or staff member must review it first.',
             '',
             `**AI close reason:** ${truncate(reason, 900)}`,
           ].join(
@@ -3338,6 +3390,11 @@ async function closeTicketByAi(
           ),
         ),
     ],
+
+    components:
+      ticketReviewControls(
+        channel.id,
+      ),
   });
 
   const transcript =
@@ -3366,7 +3423,7 @@ async function closeTicketByAi(
               `**type:** ${ticket.type}`,
               '',
               'The AI closed this ticket without human confirmation.',
-              'Review the transcript, then approve/delete it, reopen it, or escalate it.',
+              'Review the transcript, then **Approve & Delete** it or **Reopen** it.',
             ].join(
               '\n',
             ),
@@ -3418,7 +3475,7 @@ async function handleTicketReviewButton(
   const match =
     interaction.customId
       .match(
-        /^ticketreview_(approve|reopen|escalate)_(\d+)$/,
+        /^ticketreview_(approve|reopen)_(\d+)$/,
       );
 
   if (!match) {
@@ -3436,7 +3493,7 @@ async function handleTicketReviewButton(
     ];
 
   const member =
-    await requireStaff(
+    await requireTicketStaff(
       interaction,
     );
 
@@ -3557,6 +3614,9 @@ async function handleTicketReviewButton(
       .edit(
         ticket.opener_id,
         {
+          ViewChannel:
+            true,
+
           SendMessages:
             true,
         },
@@ -3617,93 +3677,6 @@ async function handleTicketReviewButton(
     });
   }
 
-  if (
-    action ===
-    'escalate'
-  ) {
-    const route =
-      ticket.type ===
-        'verify'
-        ? 'verification'
-        : (
-          ticket.type ===
-            'purchase' ||
-          ticket.type ===
-            'owner'
-            ? 'owner'
-            : 'moderation'
-        );
-
-    const capability =
-      fallbackTicketCapability(
-        ticket,
-        'human review escalation',
-        route,
-      );
-
-    await channel.permissionOverwrites
-      .edit(
-        ticket.opener_id,
-        {
-          SendMessages:
-            true,
-        },
-        {
-          reason:
-            `AI close escalated by ${member.user.tag}`,
-        },
-      )
-      .catch(
-        () =>
-          null,
-      );
-
-    await channel
-      .setName(
-        channel.name
-          .replace(
-            /^ai-closed-/,
-            '',
-          )
-          .slice(
-            0,
-            100,
-          ),
-      )
-      .catch(
-        () =>
-          null,
-      );
-
-    await escalateTicket(
-      channel,
-      ticket,
-      route,
-      capability,
-      `Human reviewer ${member.user.tag} escalated an AI-closed ticket after transcript review.`,
-    );
-
-    sql.finishTicketAiReview.run(
-      'escalated',
-      member.id,
-      Date.now(),
-      channelId,
-    );
-
-    return interaction.update({
-      embeds: [
-        baseEmbed()
-          .setTitle(
-            '⚠ AI ticket review // escalated',
-          )
-          .setDescription(
-            `${member} escalated <#${channelId}> for human handling.`,
-          ),
-      ],
-
-      components: [],
-    });
-  }
 }
 
 async function runTicketAi(
@@ -6465,7 +6438,17 @@ async function createTicketChannel(
             null,
         );
 
-    if (channel) {
+    if (
+      channel &&
+      !channel.name
+        .startsWith(
+          'closed-',
+        ) &&
+      !channel.name
+        .startsWith(
+          'ai-closed-',
+        )
+    ) {
       return interaction.reply(
         ephemeral({
           content:
@@ -6474,13 +6457,15 @@ async function createTicketChannel(
       );
     }
 
-    sql.deleteTicket.run(
-      existing.channel_id,
-    );
+    if (!channel) {
+      sql.deleteTicket.run(
+        existing.channel_id,
+      );
 
-    sql.deleteTicketAiState.run(
-      existing.channel_id,
-    );
+      sql.deleteTicketAiState.run(
+        existing.channel_id,
+      );
+    }
   }
 
   const ticketWait =
@@ -6526,6 +6511,7 @@ async function createTicketChannel(
   }
 
   const accessRoles = [
+    CONFIG.ROLES.SUPPORT_TEAM,
     CONFIG.ROLES.MOD,
     CONFIG.ROLES.SR_MOD,
     CONFIG.ROLES.ADMIN,
@@ -6839,7 +6825,7 @@ async function sendTicketTranscript(
 ) {
   if (
     !member ||
-    !isStaff(
+    !isTicketStaff(
       member,
     )
   ) {
@@ -6954,7 +6940,7 @@ async function handleTicketButton(
 
     if (
       !member ||
-      !isStaff(
+      !isTicketStaff(
         member,
       )
     ) {
@@ -7106,7 +7092,7 @@ async function handleTicketButton(
   ) {
     if (
       !member ||
-      !isStaff(
+      !isTicketStaff(
         member,
       )
     ) {
@@ -7159,7 +7145,7 @@ async function handleTicketButton(
           ticket.opener_id ||
         (
           member &&
-          isStaff(
+          isTicketStaff(
             member,
           )
         )
@@ -7181,11 +7167,31 @@ async function handleTicketButton(
         interaction.channel,
       );
 
+    await interaction.reply({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '⌁ ticket closed',
+          )
+          .setDescription(
+            `closed by ${interaction.user}.`,
+          ),
+      ],
+
+      components:
+        ticketControls(
+          true,
+        ),
+    });
+
     await interaction.channel
       .permissionOverwrites
       .edit(
         ticket.opener_id,
         {
+          ViewChannel:
+            false,
+
           SendMessages:
             false,
         },
@@ -7220,23 +7226,6 @@ async function handleTicketButton(
         );
     }
 
-    await interaction.reply({
-      embeds: [
-        baseEmbed()
-          .setTitle(
-            '⌁ ticket closed',
-          )
-          .setDescription(
-            `closed by ${interaction.user}.`,
-          ),
-      ],
-
-      components:
-        ticketControls(
-          true,
-        ),
-    });
-
     await logEvent(
       'ticket closed',
       `${interaction.user.tag} closed <#${interaction.channelId}>.`,
@@ -7259,7 +7248,7 @@ async function handleTicketButton(
   ) {
     if (
       !member ||
-      !isStaff(
+      !isTicketStaff(
         member,
       )
     ) {
@@ -11606,6 +11595,69 @@ async function reconcilePersistentState(
       );
 
       staleTickets++;
+    } else if (
+      channel.isTextBased()
+    ) {
+      await channel.permissionOverwrites
+        .edit(
+          CONFIG.ROLES
+            .SUPPORT_TEAM,
+          {
+            ViewChannel:
+              true,
+
+            SendMessages:
+              true,
+
+            ReadMessageHistory:
+              true,
+
+            AttachFiles:
+              true,
+
+            EmbedLinks:
+              true,
+          },
+          {
+            reason:
+              'Support Team ticket access',
+          },
+        )
+        .catch(
+          () =>
+            null,
+        );
+
+      if (
+        channel.name
+          .startsWith(
+            'closed-',
+          ) ||
+        channel.name
+          .startsWith(
+            'ai-closed-',
+          )
+      ) {
+        await channel.permissionOverwrites
+          .edit(
+            row.opener_id,
+            {
+              ViewChannel:
+                false,
+
+              SendMessages:
+                false,
+            },
+            {
+              reason:
+                'Closed ticket hidden from opener',
+            },
+          )
+          .catch(
+            () =>
+              null,
+          );
+      }
     }
   }
 
