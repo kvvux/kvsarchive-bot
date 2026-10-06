@@ -1234,6 +1234,9 @@ const ticketOpenCooldowns =
 const ticketAiLocks =
   new Set();
 
+const ticketAiPending =
+  new Map();
+
 const stickyTimers =
   new Map();
 
@@ -3055,12 +3058,28 @@ async function runTicketAi(
 ) {
   if (
     !channel
-      ?.isTextBased() ||
+      ?.isTextBased()
+  ) {
+    return;
+  }
+
+  if (
     ticketAiLocks
       .has(
         channel.id,
       )
   ) {
+    ticketAiPending.set(
+      channel.id,
+      {
+        channel,
+        ticket,
+        opener,
+        requestText,
+        sourceMessage,
+      },
+    );
+
     return;
   }
 
@@ -3246,6 +3265,22 @@ async function runTicketAi(
       }
     }
 
+    const latestTicket =
+      sql.getTicket.get(
+        channel.id,
+      );
+
+    if (
+      !latestTicket ||
+      latestTicket.claimed_by ||
+      channel.name
+        .startsWith(
+          'closed-',
+        )
+    ) {
+      return;
+    }
+
     const replyText =
       testMode
         ? `**owner test mode** — escalation pings are suppressed.\n\n${decision.reply}`
@@ -3368,6 +3403,35 @@ async function runTicketAi(
     ticketAiLocks.delete(
       channel.id,
     );
+
+    const pending =
+      ticketAiPending.get(
+        channel.id,
+      );
+
+    if (pending) {
+      ticketAiPending.delete(
+        channel.id,
+      );
+
+      setTimeout(
+        () =>
+          runTicketAi(
+            pending.channel,
+            pending.ticket,
+            pending.opener,
+            pending.requestText,
+            pending.sourceMessage,
+          ).catch(
+            (error) =>
+              console.error(
+                '[ticket-ai-pending]',
+                error,
+              ),
+          ),
+        500,
+      ).unref();
+    }
   }
 }
 
@@ -11770,6 +11834,10 @@ client.on(
       );
 
       sql.deleteTicketAiState.run(
+        channel.id,
+      );
+
+      ticketAiPending.delete(
         channel.id,
       );
     }
