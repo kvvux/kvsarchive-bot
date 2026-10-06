@@ -58,6 +58,7 @@ const CONFIG = {
     ADMIN: '1539778556018823168',
     SR_MOD: '1539777299942211644',
     MOD: '1539775895810867320',
+    SUPPORT_TEAM: '1557102267549753465',
     ASCENDANT: '1539775373028626512',
     MANAGEMENT: '1539779210212548728',
 
@@ -195,6 +196,14 @@ const STAFF_ROLE_IDS = [
   CONFIG.ROLES.SR_MOD,
   CONFIG.ROLES.ADMIN,
   CONFIG.ROLES.ASCENDANT,
+  CONFIG.ROLES.MANAGEMENT,
+];
+
+const TICKET_STAFF_ROLE_IDS = [
+  CONFIG.ROLES.SUPPORT_TEAM,
+  CONFIG.ROLES.MOD,
+  CONFIG.ROLES.SR_MOD,
+  CONFIG.ROLES.ADMIN,
   CONFIG.ROLES.MANAGEMENT,
 ];
 
@@ -1359,6 +1368,56 @@ function isStaff(
       )
     ),
   );
+}
+
+function isTicketStaff(
+  member,
+) {
+  return Boolean(
+    member &&
+    (
+      isOwner(
+        member.id,
+      ) ||
+      hasAnyRole(
+        member,
+        TICKET_STAFF_ROLE_IDS,
+      )
+    ),
+  );
+}
+
+async function requireTicketStaff(
+  interaction,
+) {
+  const member =
+    await getInteractionMember(
+      interaction,
+    );
+
+  if (
+    member &&
+    isTicketStaff(
+      member,
+    )
+  ) {
+    return member;
+  }
+
+  await interaction.reply(
+    ephemeral({
+      embeds: [
+        errorEmbed(
+          'ticket support team only.',
+        ),
+      ],
+    }),
+  ).catch(
+    () =>
+      null,
+  );
+
+  return null;
 }
 
 function isManagement(
@@ -2929,6 +2988,7 @@ async function findTicketEscalationTarget(
 
   const candidates =
     [
+      CONFIG.ROLES.SUPPORT_TEAM,
       CONFIG.ROLES.MOD,
       CONFIG.ROLES.SR_MOD,
       CONFIG.ROLES.ADMIN,
@@ -6526,6 +6586,7 @@ async function createTicketChannel(
   }
 
   const accessRoles = [
+    CONFIG.ROLES.SUPPORT_TEAM,
     CONFIG.ROLES.MOD,
     CONFIG.ROLES.SR_MOD,
     CONFIG.ROLES.ADMIN,
