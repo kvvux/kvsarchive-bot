@@ -428,6 +428,22 @@ db.exec(`
     ai_messages INTEGER NOT NULL DEFAULT 0
   );
 
+  CREATE TABLE IF NOT EXISTS ticket_ai_reviews (
+    channel_id TEXT PRIMARY KEY,
+
+    review_channel_id TEXT NOT NULL,
+
+    review_message_id TEXT NOT NULL,
+
+    status TEXT NOT NULL DEFAULT 'pending',
+
+    closed_at INTEGER NOT NULL,
+
+    reviewed_by TEXT,
+
+    reviewed_at INTEGER
+  );
+
   CREATE TABLE IF NOT EXISTS stickies (
     channel_id TEXT PRIMARY KEY,
 
@@ -1015,6 +1031,44 @@ const sql = {
       WHERE channel_id = ?
     `),
 
+  setTicketAiReview:
+    db.prepare(`
+      INSERT OR REPLACE
+      INTO ticket_ai_reviews (
+        channel_id,
+        review_channel_id,
+        review_message_id,
+        status,
+        closed_at,
+        reviewed_by,
+        reviewed_at
+      )
+
+      VALUES (
+        ?, ?, ?, 'pending', ?, NULL, NULL
+      )
+    `),
+
+  getTicketAiReview:
+    db.prepare(`
+      SELECT *
+      FROM ticket_ai_reviews
+
+      WHERE channel_id = ?
+    `),
+
+  finishTicketAiReview:
+    db.prepare(`
+      UPDATE ticket_ai_reviews
+
+      SET
+        status = ?,
+        reviewed_by = ?,
+        reviewed_at = ?
+
+      WHERE channel_id = ?
+    `),
+
   getSticky:
     db.prepare(`
       SELECT *
@@ -1236,6 +1290,9 @@ const ticketAiLocks =
 
 const ticketAiPending =
   new Map();
+
+let ownerTicketLiveMode =
+  false;
 
 const stickyTimers =
   new Map();
@@ -2388,6 +2445,53 @@ function normalizeTicketCapability(
       : 'none';
 }
 
+function normalizeTicketAction(
+  action,
+) {
+  const value =
+    String(
+      action ||
+      '',
+    )
+      .trim()
+      .toLowerCase();
+
+  return [
+    'none',
+    'close_ticket',
+  ].includes(
+    value,
+  )
+    ? value
+    : 'none';
+}
+
+function explicitTicketCloseIntent(
+  text,
+) {
+  const value =
+    String(
+      text ||
+      '',
+    )
+      .toLowerCase();
+
+  return (
+    /\b(close|end|archive)\b.{0,30}\b(ticket|this)\b/i
+      .test(
+        value,
+      ) ||
+    /\b(ticket|this)\b.{0,30}\b(close|end|archive)\b/i
+      .test(
+        value,
+      ) ||
+    /\b(close it|close this|you can close|can close now|please close|resolved.*close|fixed.*close)\b/i
+      .test(
+        value,
+      )
+  );
+}
+
 function parseTicketAiJson(
   raw,
   fallbackRoute = 'none',
@@ -2461,6 +2565,9 @@ function parseTicketAiJson(
       capability:
         fallbackCapability,
 
+      action:
+        'none',
+
       reason:
         'AI response was not structured.',
     };
@@ -2474,6 +2581,11 @@ function parseTicketAiJson(
   const capability =
     normalizeTicketCapability(
       parsed.capability,
+    );
+
+  const action =
+    normalizeTicketAction(
+      parsed.action,
     );
 
   return {
@@ -2508,6 +2620,8 @@ function parseTicketAiJson(
       )
         ? fallbackCapability
         : capability,
+
+    action,
 
     reason:
       truncate(
@@ -2680,9 +2794,12 @@ function ticketAiInstructions() {
     '- owner: purchases, paid roles, refunds, money, ownership-only requests, or anything explicitly requiring the server owner.',
     'Also choose the minimum capability the human needs: none, manage_roles, manage_messages, moderate_members, kick_members, ban_members, manage_guild, or owner.',
     'Examples: manual verification -> verification + manage_roles; timeout -> moderation + moderate_members; kick -> moderation + kick_members; ban -> moderation + ban_members; normal report review -> moderation + manage_messages; server configuration -> management + manage_guild; paid role/refund -> owner + owner.',
-    'If test_mode is true, respond as if testing the workflow but ALWAYS output route none, capability none, and needs_human false. Never request or imply a staff ping.',
+    'You also have one safe ticket action: close_ticket.',
+    'Use action close_ticket ONLY when the ticket opener explicitly asks you to close/end/archive the ticket and the conversation appears resolved or they clearly want to stop. Otherwise action must be none.',
+    'Never use close_ticket merely because you think the issue is finished.',
+    'If test_mode is true, respond as if testing the workflow but ALWAYS output route none, capability none, and needs_human false. Ticket close actions may still be tested.',
     'Return ONLY valid JSON. No markdown fence.',
-    'Schema: {"reply":"message for the ticket opener","needs_human":false,"route":"none","capability":"none","reason":"short internal reason"}',
+    'Schema: {"reply":"message for the ticket opener","needs_human":false,"route":"none","capability":"none","action":"none","reason":"short internal reason"}',
   ].join(
     ' ',
   );
@@ -2945,8 +3062,11 @@ async function escalateTicket(
   if (
     normalized ===
       'none' ||
-    isOwner(
-      ticket.opener_id,
+    (
+      isOwner(
+        ticket.opener_id,
+      ) &&
+      !ownerTicketLiveMode
     )
   ) {
     return false;
@@ -3095,6 +3215,497 @@ async function escalateTicket(
   return true;
 }
 
+function ticketReviewControls(
+  channelId,
+) {
+  return [
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            `ticketreview_approve_${channelId}`,
+          )
+          .setLabel(
+            'Approve & Delete',
+          )
+          .setStyle(
+            ButtonStyle.Success,
+          ),
+
+        new ButtonBuilder()
+          .setCustomId(
+            `ticketreview_reopen_${channelId}`,
+          )
+          .setLabel(
+            'Reopen',
+          )
+          .setStyle(
+            ButtonStyle.Secondary,
+          ),
+
+        new ButtonBuilder()
+          .setCustomId(
+            `ticketreview_escalate_${channelId}`,
+          )
+          .setLabel(
+            'Escalate',
+          )
+          .setStyle(
+            ButtonStyle.Danger,
+          ),
+      ),
+  ];
+}
+
+async function closeTicketByAi(
+  channel,
+  ticket,
+  opener,
+  reason,
+) {
+  const current =
+    sql.getTicket.get(
+      channel.id,
+    );
+
+  if (
+    !current ||
+    current.claimed_by ||
+    channel.name
+      .startsWith(
+        'ai-closed-',
+      ) ||
+    channel.name
+      .startsWith(
+        'closed-',
+      )
+  ) {
+    return false;
+  }
+
+  await channel.permissionOverwrites
+    .edit(
+      ticket.opener_id,
+      {
+        SendMessages:
+          false,
+      },
+      {
+        reason:
+          'AI-resolved ticket awaiting human review',
+      },
+    )
+    .catch(
+      () =>
+        null,
+    );
+
+  if (
+    !channel.name
+      .startsWith(
+        'ai-closed-',
+      )
+  ) {
+    await channel
+      .setName(
+        `ai-closed-${channel.name}`
+          .slice(
+            0,
+            100,
+          ),
+      )
+      .catch(
+        () =>
+          null,
+      );
+  }
+
+  await channel.send({
+    embeds: [
+      baseEmbed()
+        .setTitle(
+          '⌁ AI closed // review pending',
+        )
+        .setDescription(
+          [
+            `${opener}, this ticket was closed by AI because you requested it.`,
+            '',
+            '**It has NOT been deleted.** A human staff member must review the transcript first.',
+            '',
+            `**AI close reason:** ${truncate(reason, 900)}`,
+          ].join(
+            '\n',
+          ),
+        ),
+    ],
+  });
+
+  const transcript =
+    await buildTranscript(
+      channel,
+    );
+
+  const reviewChannel =
+    await checkTextChannel(
+      channel.guild,
+      CONFIG.CHANNELS
+        .SERVER_LOGS,
+    );
+
+  const reviewMessage =
+    await reviewChannel.send({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '⌁ AI ticket review required',
+          )
+          .setDescription(
+            [
+              `**ticket:** <#${channel.id}>`,
+              `**opener:** <@${ticket.opener_id}> (${ticket.opener_id})`,
+              `**type:** ${ticket.type}`,
+              '',
+              'The AI closed this ticket without human confirmation.',
+              'Review the transcript, then approve/delete it, reopen it, or escalate it.',
+            ].join(
+              '\n',
+            ),
+          ),
+      ],
+
+      files: [
+        new AttachmentBuilder(
+          transcript,
+          {
+            name:
+              `${sanitizeChannelName(channel.name)}-ai-review-transcript.txt`,
+          },
+        ),
+      ],
+
+      components:
+        ticketReviewControls(
+          channel.id,
+        ),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+  sql.setTicketAiReview.run(
+    channel.id,
+    reviewChannel.id,
+    reviewMessage.id,
+    Date.now(),
+  );
+
+  ticketAiPending.delete(
+    channel.id,
+  );
+
+  await logEvent(
+    'AI ticket closed',
+    `<#${channel.id}> was closed by AI and queued for human transcript review.`,
+  );
+
+  return true;
+}
+
+async function handleTicketReviewButton(
+  interaction,
+) {
+  const match =
+    interaction.customId
+      .match(
+        /^ticketreview_(approve|reopen|escalate)_(\d+)$/,
+      );
+
+  if (!match) {
+    return;
+  }
+
+  const action =
+    match[
+      1
+    ];
+
+  const channelId =
+    match[
+      2
+    ];
+
+  const member =
+    await requireStaff(
+      interaction,
+    );
+
+  if (!member) {
+    return;
+  }
+
+  const review =
+    sql.getTicketAiReview.get(
+      channelId,
+    );
+
+  if (
+    !review ||
+    review.status !==
+      'pending'
+  ) {
+    return interaction.reply(
+      ephemeral({
+        content:
+          'this AI-closed ticket has already been reviewed.',
+      }),
+    );
+  }
+
+  const ticket =
+    sql.getTicket.get(
+      channelId,
+    );
+
+  const channel =
+    await interaction.guild.channels
+      .fetch(
+        channelId,
+      )
+      .catch(
+        () =>
+          null,
+      );
+
+  if (
+    action ===
+    'approve'
+  ) {
+    sql.finishTicketAiReview.run(
+      'approved',
+      member.id,
+      Date.now(),
+      channelId,
+    );
+
+    if (ticket) {
+      sql.deleteTicket.run(
+        channelId,
+      );
+
+      sql.deleteTicketAiState.run(
+        channelId,
+      );
+    }
+
+    ticketAiPending.delete(
+      channelId,
+    );
+
+    await interaction.update({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '† AI ticket review approved',
+          )
+          .setDescription(
+            `${member} reviewed the transcript and approved deletion of <#${channelId}>.`,
+          ),
+      ],
+
+      components: [],
+    });
+
+    await logEvent(
+      'AI ticket review approved',
+      `${member.user.tag} approved and deleted AI-closed ticket ${channelId}.`,
+    );
+
+    if (channel) {
+      setTimeout(
+        () =>
+          channel.delete(
+            `AI close reviewed and approved by ${member.user.tag}`,
+          ).catch(
+            () =>
+              null,
+          ),
+        1500,
+      ).unref();
+    }
+
+    return;
+  }
+
+  if (
+    !ticket ||
+    !channel
+  ) {
+    return interaction.reply(
+      ephemeral({
+        content:
+          'the original ticket channel no longer exists.',
+      }),
+    );
+  }
+
+  if (
+    action ===
+    'reopen'
+  ) {
+    await channel.permissionOverwrites
+      .edit(
+        ticket.opener_id,
+        {
+          SendMessages:
+            true,
+        },
+        {
+          reason:
+            `AI close rejected by ${member.user.tag}`,
+        },
+      );
+
+    await channel
+      .setName(
+        channel.name
+          .replace(
+            /^ai-closed-/,
+            '',
+          )
+          .slice(
+            0,
+            100,
+          ),
+      )
+      .catch(
+        () =>
+          null,
+      );
+
+    sql.finishTicketAiReview.run(
+      'reopened',
+      member.id,
+      Date.now(),
+      channelId,
+    );
+
+    await channel.send({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '⌁ ticket reopened',
+          )
+          .setDescription(
+            `${member} reviewed the AI closure and reopened this ticket.`,
+          ),
+      ],
+    });
+
+    return interaction.update({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '⌁ AI ticket review // reopened',
+          )
+          .setDescription(
+            `${member} reopened <#${channelId}> after reviewing the transcript.`,
+          ),
+      ],
+
+      components: [],
+    });
+  }
+
+  if (
+    action ===
+    'escalate'
+  ) {
+    const route =
+      ticket.type ===
+        'verify'
+        ? 'verification'
+        : (
+          ticket.type ===
+            'purchase' ||
+          ticket.type ===
+            'owner'
+            ? 'owner'
+            : 'moderation'
+        );
+
+    const capability =
+      fallbackTicketCapability(
+        ticket,
+        'human review escalation',
+        route,
+      );
+
+    await channel.permissionOverwrites
+      .edit(
+        ticket.opener_id,
+        {
+          SendMessages:
+            true,
+        },
+        {
+          reason:
+            `AI close escalated by ${member.user.tag}`,
+        },
+      )
+      .catch(
+        () =>
+          null,
+      );
+
+    await channel
+      .setName(
+        channel.name
+          .replace(
+            /^ai-closed-/,
+            '',
+          )
+          .slice(
+            0,
+            100,
+          ),
+      )
+      .catch(
+        () =>
+          null,
+      );
+
+    await escalateTicket(
+      channel,
+      ticket,
+      route,
+      capability,
+      `Human reviewer ${member.user.tag} escalated an AI-closed ticket after transcript review.`,
+    );
+
+    sql.finishTicketAiReview.run(
+      'escalated',
+      member.id,
+      Date.now(),
+      channelId,
+    );
+
+    return interaction.update({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '⚠ AI ticket review // escalated',
+          )
+          .setDescription(
+            `${member} escalated <#${channelId}> for human handling.`,
+          ),
+      ],
+
+      components: [],
+    });
+  }
+}
+
 async function runTicketAi(
   channel,
   ticket,
@@ -3136,7 +3747,15 @@ async function runTicketAi(
 
   if (
     !freshTicket ||
-    freshTicket.claimed_by
+    freshTicket.claimed_by ||
+    channel.name
+      .startsWith(
+        'closed-',
+      ) ||
+    channel.name
+      .startsWith(
+        'ai-closed-',
+      )
   ) {
     return;
   }
@@ -3160,7 +3779,8 @@ async function runTicketAi(
     const testMode =
       isOwner(
         ticket.opener_id,
-      );
+      ) &&
+      !ownerTicketLiveMode;
 
     const context =
       await buildRecentContext(
@@ -3222,6 +3842,9 @@ async function runTicketAi(
             unavailableRoute,
           ),
 
+        action:
+          'none',
+
         reason:
           'AI support unavailable.',
       };
@@ -3261,7 +3884,34 @@ async function runTicketAi(
         );
     }
 
-    if (testMode) {
+    const wantsClose =
+      explicitTicketCloseIntent(
+        requestText,
+      );
+
+    if (
+      decision.action ===
+        'close_ticket' &&
+      !wantsClose
+    ) {
+      decision.action =
+        'none';
+    }
+
+    if (
+      decision.action ===
+        'close_ticket' &&
+      wantsClose
+    ) {
+      decision.needs_human =
+        false;
+
+      decision.route =
+        'none';
+
+      decision.capability =
+        'none';
+    } else if (testMode) {
       decision.needs_human =
         false;
 
@@ -3322,6 +3972,10 @@ async function runTicketAi(
       channel.name
         .startsWith(
           'closed-',
+        ) ||
+      channel.name
+        .startsWith(
+          'ai-closed-',
         )
     ) {
       return;
@@ -3369,6 +4023,22 @@ async function runTicketAi(
     );
 
     if (
+      decision.action ===
+        'close_ticket' &&
+      wantsClose
+    ) {
+      await closeTicketByAi(
+        channel,
+        ticket,
+        opener,
+        decision.reason ||
+          'The opener asked to close the resolved ticket.',
+      );
+
+      return;
+    }
+
+    if (
       decision.needs_human &&
       decision.route !==
         'none'
@@ -3389,10 +4059,14 @@ async function runTicketAi(
       error,
     );
 
-    const fallbackRoute =
+    const ownerSafeMode =
       isOwner(
         ticket.opener_id,
-      )
+      ) &&
+      !ownerTicketLiveMode;
+
+    const fallbackRoute =
+      ownerSafeMode
         ? 'none'
         : (
           fallbackTicketRoute(
@@ -3403,9 +4077,7 @@ async function runTicketAi(
         );
 
     const errorRoute =
-      isOwner(
-        ticket.opener_id,
-      )
+      ownerSafeMode
         ? 'none'
         : (
           fallbackRoute ===
@@ -6037,8 +6709,11 @@ async function createTicketChannel(
         [
           `${opener}, your ticket is open.`,
           '',
-          isOwner(
-            opener.id,
+          (
+            isOwner(
+              opener.id,
+            ) &&
+            !ownerTicketLiveMode
           )
             ? '**Owner test mode is active.** AI will respond normally, but staff escalation pings are suppressed.'
             : '**AI support will respond first.** If the issue needs a real staff action, the bot will escalate it automatically.',
@@ -9595,6 +10270,12 @@ async function doctorReport(
       : '⚠️ OPENAI_API_KEY is missing — /ask is unavailable and tickets will fall back directly to human routing',
   );
 
+  lines.push(
+    ownerTicketLiveMode
+      ? '⚠️ owner ticket test mode: LIVE — owner tickets can ping real staff'
+      : '✅ owner ticket test mode: SAFE — owner escalation pings suppressed',
+  );
+
   const category =
     await guild.channels
       .fetch(
@@ -10788,6 +11469,31 @@ const commands = [
     .setName('archive-server')
     .setDescription('owner: export the current server structure and IDs')
     .setDefaultMemberPermissions(OWNER_PERM),
+
+  new SlashCommandBuilder()
+    .setName('tickettestmode')
+    .setDescription('owner: control owner ticket escalation testing')
+    .setDefaultMemberPermissions(OWNER_PERM)
+    .addStringOption((option) =>
+      option
+        .setName('mode')
+        .setDescription('safe suppresses staff pings; live tests real escalation')
+        .setRequired(true)
+        .addChoices(
+          {
+            name: 'safe',
+            value: 'safe',
+          },
+          {
+            name: 'live',
+            value: 'live',
+          },
+          {
+            name: 'status',
+            value: 'status',
+          },
+        ),
+    ),
 
   new SlashCommandBuilder()
     .setName('say')
@@ -12018,6 +12724,17 @@ client.on(
         if (
           interaction.customId
             .startsWith(
+              'ticketreview_',
+            )
+        ) {
+          return handleTicketReviewButton(
+            interaction,
+          );
+        }
+
+        if (
+          interaction.customId
+            .startsWith(
               'ticket_',
             )
         ) {
@@ -12208,7 +12925,7 @@ async function handleSlashCommand(
 
         '**owner**',
 
-        '`/setup` `/staffapppost` `/test` `/doctor` `/archive-server` `/dropnow` `/xp` `/synclevelroles` `/syncautoroles` `/say` `/embedpost`',
+        '`/setup` `/staffapppost` `/test` `/doctor` `/archive-server` `/tickettestmode` `/dropnow` `/xp` `/synclevelroles` `/syncautoroles` `/say` `/embedpost`',
       );
     }
 
@@ -15409,6 +16126,57 @@ async function handleSlashCommand(
   // ==========================================================================
   // OWNER
   // ==========================================================================
+
+  if (
+    name ===
+    'tickettestmode'
+  ) {
+    if (
+      !await requireOwner(
+        interaction,
+      )
+    ) {
+      return;
+    }
+
+    const mode =
+      interaction.options
+        .getString(
+          'mode',
+        );
+
+    if (
+      mode ===
+      'live'
+    ) {
+      ownerTicketLiveMode =
+        true;
+    }
+
+    if (
+      mode ===
+      'safe'
+    ) {
+      ownerTicketLiveMode =
+        false;
+    }
+
+    return interaction.reply(
+      ephemeral({
+        embeds: [
+          baseEmbed()
+            .setTitle(
+              '⌁ owner ticket test mode',
+            )
+            .setDescription(
+              ownerTicketLiveMode
+                ? '**LIVE** — tickets you open now use normal escalation and can ping real staff. This resets to SAFE whenever the bot restarts.'
+                : '**SAFE** — tickets you open suppress staff escalation pings. This is the default after every restart.',
+            ),
+        ],
+      }),
+    );
+  }
 
   if (
     name ===
