@@ -417,6 +417,8 @@ db.exec(`
 
     escalation_route TEXT,
 
+    escalation_capability TEXT,
+
     escalation_target TEXT,
 
     escalated_at INTEGER,
@@ -998,6 +1000,7 @@ const sql = {
 
       SET
         escalation_route = ?,
+        escalation_capability = ?,
         escalation_target = ?,
         escalated_at = ?
 
@@ -2329,6 +2332,17 @@ const TICKET_ROUTE_PRIORITY = {
   owner: 3,
 };
 
+const TICKET_CAPABILITY_PRIORITY = {
+  none: 0,
+  manage_messages: 1,
+  moderate_members: 2,
+  kick_members: 3,
+  ban_members: 4,
+  manage_roles: 4,
+  manage_guild: 5,
+  owner: 6,
+};
+
 function normalizeTicketRoute(
   route,
 ) {
@@ -2350,9 +2364,31 @@ function normalizeTicketRoute(
       : 'none';
 }
 
+function normalizeTicketCapability(
+  capability,
+) {
+  const value =
+    String(
+      capability ||
+      '',
+    )
+      .trim()
+      .toLowerCase();
+
+  return Object.prototype
+    .hasOwnProperty
+    .call(
+      TICKET_CAPABILITY_PRIORITY,
+      value,
+    )
+      ? value
+      : 'none';
+}
+
 function parseTicketAiJson(
   raw,
   fallbackRoute = 'none',
+  fallbackCapability = 'none',
 ) {
   const text =
     String(
@@ -2419,6 +2455,9 @@ function parseTicketAiJson(
       route:
         fallbackRoute,
 
+      capability:
+        fallbackCapability,
+
       reason:
         'AI response was not structured.',
     };
@@ -2427,6 +2466,11 @@ function parseTicketAiJson(
   const route =
     normalizeTicketRoute(
       parsed.route,
+    );
+
+  const capability =
+    normalizeTicketCapability(
+      parsed.capability,
     );
 
   return {
@@ -2450,6 +2494,17 @@ function parseTicketAiJson(
       parsed.needs_human
         ? fallbackRoute
         : route,
+
+    capability:
+      capability ===
+        'none' &&
+      (
+        parsed.needs_human ||
+        route !==
+          'none'
+      )
+        ? fallbackCapability
+        : capability,
 
     reason:
       truncate(
@@ -2518,6 +2573,80 @@ function fallbackTicketRoute(
   return 'none';
 }
 
+function fallbackTicketCapability(
+  ticket,
+  text,
+  route,
+) {
+  const lower =
+    String(
+      text ||
+      '',
+    )
+      .toLowerCase();
+
+  if (
+    route ===
+      'owner' ||
+    ticket.type ===
+      'purchase' ||
+    ticket.type ===
+      'owner'
+  ) {
+    return 'owner';
+  }
+
+  if (
+    route ===
+      'verification'
+  ) {
+    return 'manage_roles';
+  }
+
+  if (
+    route ===
+      'management'
+  ) {
+    return 'manage_guild';
+  }
+
+  if (
+    route ===
+    'moderation'
+  ) {
+    if (
+      /\bban|banned|ban request\b/i
+        .test(
+          lower,
+        )
+    ) {
+      return 'ban_members';
+    }
+
+    if (
+      /\bkick|kicked\b/i
+        .test(
+          lower,
+        )
+    ) {
+      return 'kick_members';
+    }
+
+    if (
+      /\btimeout|mute|muted|timeouted\b/i
+        .test(
+          lower,
+        )
+    ) {
+      return 'moderate_members';
+    }
+
+    return 'manage_messages';
+  }
+
+  return 'none';
+}
+
 function ticketServerKnowledge() {
   return [
     'kvsarchive support facts:',
@@ -2546,17 +2675,19 @@ function ticketAiInstructions() {
     '- moderation: reports, investigations, warnings, timeouts, kicks, bans, or rule enforcement.',
     '- management: server/channel/permission/configuration matters that need higher staff.',
     '- owner: purchases, paid roles, refunds, money, ownership-only requests, or anything explicitly requiring the server owner.',
-    'If test_mode is true, respond as if testing the workflow but ALWAYS output route none and needs_human false. Never request or imply a staff ping.',
+    'Also choose the minimum capability the human needs: none, manage_roles, manage_messages, moderate_members, kick_members, ban_members, manage_guild, or owner.',
+    'Examples: manual verification -> verification + manage_roles; timeout -> moderation + moderate_members; kick -> moderation + kick_members; ban -> moderation + ban_members; normal report review -> moderation + manage_messages; server configuration -> management + manage_guild; paid role/refund -> owner + owner.',
+    'If test_mode is true, respond as if testing the workflow but ALWAYS output route none, capability none, and needs_human false. Never request or imply a staff ping.',
     'Return ONLY valid JSON. No markdown fence.',
-    'Schema: {"reply":"message for the ticket opener","needs_human":false,"route":"none","reason":"short internal reason"}',
+    'Schema: {"reply":"message for the ticket opener","needs_human":false,"route":"none","capability":"none","reason":"short internal reason"}',
   ].join(
     ' ',
   );
 }
 
-function roleCanHandleTicketRoute(
+function roleCanHandleTicketCapability(
   role,
-  route,
+  capability,
   guild,
 ) {
   if (
@@ -2577,8 +2708,8 @@ function roleCanHandleTicketRoute(
   }
 
   if (
-    route ===
-    'verification'
+    capability ===
+    'manage_roles'
   ) {
     const verifyRole =
       guild.roles.cache
@@ -2613,51 +2744,43 @@ function roleCanHandleTicketRoute(
     );
   }
 
-  if (
-    route ===
-    'moderation'
-  ) {
-    return (
-      role.permissions
-        .has(
-          PermissionFlagsBits
-            .ModerateMembers,
-        ) ||
-      role.permissions
-        .has(
-          PermissionFlagsBits
-            .KickMembers,
-        ) ||
-      role.permissions
-        .has(
-          PermissionFlagsBits
-            .BanMembers,
-        ) ||
-      role.permissions
-        .has(
-          PermissionFlagsBits
-            .ManageMessages,
-        )
-    );
-  }
+  const requiredPermission = {
+    manage_messages:
+      PermissionFlagsBits
+        .ManageMessages,
 
-  if (
-    route ===
-    'management'
-  ) {
-    return role.permissions
+    moderate_members:
+      PermissionFlagsBits
+        .ModerateMembers,
+
+    kick_members:
+      PermissionFlagsBits
+        .KickMembers,
+
+    ban_members:
+      PermissionFlagsBits
+        .BanMembers,
+
+    manage_guild:
+      PermissionFlagsBits
+        .ManageGuild,
+  }[
+    capability
+  ];
+
+  return Boolean(
+    requiredPermission &&
+    role.permissions
       .has(
-        PermissionFlagsBits
-          .ManageGuild,
-      );
-  }
-
-  return false;
+        requiredPermission,
+      ),
+  );
 }
 
 async function findTicketEscalationTarget(
   guild,
   route,
+  capability,
 ) {
   if (
     route ===
@@ -2705,9 +2828,9 @@ async function findTicketEscalationTarget(
         (role) =>
           role.members.size >
             0 &&
-          roleCanHandleTicketRoute(
+          roleCanHandleTicketCapability(
             role,
-            route,
+            capability,
             guild,
           ),
       )
@@ -2757,11 +2880,17 @@ async function escalateTicket(
   channel,
   ticket,
   route,
+  capability,
   reason,
 ) {
   const normalized =
     normalizeTicketRoute(
       route,
+    );
+
+  const normalizedCapability =
+    normalizeTicketCapability(
+      capability,
     );
 
   if (
@@ -2789,19 +2918,50 @@ async function escalateTicket(
         ?.escalation_route,
     );
 
+  const currentCapability =
+    normalizeTicketCapability(
+      state
+        ?.escalation_capability,
+    );
+
+  const currentRoutePriority =
+    TICKET_ROUTE_PRIORITY[
+      currentRoute
+    ] ||
+    0;
+
+  const nextRoutePriority =
+    TICKET_ROUTE_PRIORITY[
+      normalized
+    ] ||
+    0;
+
+  const currentCapabilityPriority =
+    TICKET_CAPABILITY_PRIORITY[
+      currentCapability
+    ] ||
+    0;
+
+  const nextCapabilityPriority =
+    TICKET_CAPABILITY_PRIORITY[
+      normalizedCapability
+    ] ||
+    0;
+
   if (
-    (
-      TICKET_ROUTE_PRIORITY[
-        currentRoute
-      ] ||
-      0
-    ) >=
-    (
-      TICKET_ROUTE_PRIORITY[
-        normalized
-      ] ||
-      0
-    )
+    currentRoute ===
+      normalized &&
+    currentCapabilityPriority >=
+      nextCapabilityPriority
+  ) {
+    return false;
+  }
+
+  if (
+    currentRoute !==
+      normalized &&
+    currentRoutePriority >
+      nextRoutePriority
   ) {
     return false;
   }
@@ -2810,6 +2970,7 @@ async function escalateTicket(
     await findTicketEscalationTarget(
       channel.guild,
       normalized,
+      normalizedCapability,
     );
 
   const mention =
@@ -2848,6 +3009,7 @@ async function escalateTicket(
             `AI support needs **${target.label}** for this ticket.`,
             '',
             `**route:** ${normalized}`,
+            `**required capability:** ${normalizedCapability}`,
             `**reason:** ${truncate(reason, 700)}`,
           ].join(
             '\n',
@@ -2858,6 +3020,7 @@ async function escalateTicket(
 
   sql.setTicketEscalation.run(
     normalized,
+    normalizedCapability,
     `${target.kind}:${target.id}`,
     Date.now(),
     channel.id,
@@ -2865,7 +3028,7 @@ async function escalateTicket(
 
   await logEvent(
     'ticket escalated',
-    `<#${channel.id}> → ${normalized} → ${target.label}`,
+    `<#${channel.id}> → ${normalized} / ${normalizedCapability} → ${target.label}`,
     [
       {
         name:
@@ -2949,6 +3112,15 @@ async function runTicketAi(
             requestText,
           );
 
+    const fallbackCapability =
+      testMode
+        ? 'none'
+        : fallbackTicketCapability(
+            ticket,
+            requestText,
+            fallbackRoute,
+          );
+
     let decision;
 
     if (
@@ -2977,6 +3149,13 @@ async function runTicketAi(
 
         route:
           unavailableRoute,
+
+        capability:
+          fallbackTicketCapability(
+            ticket,
+            requestText,
+            unavailableRoute,
+          ),
 
         reason:
           'AI support unavailable.',
@@ -3013,6 +3192,7 @@ async function runTicketAi(
         parseTicketAiJson(
           raw,
           fallbackRoute,
+          fallbackCapability,
         );
     }
 
@@ -3021,6 +3201,9 @@ async function runTicketAi(
         false;
 
       decision.route =
+        'none';
+
+      decision.capability =
         'none';
     } else if (
       ticket.type ===
@@ -3033,6 +3216,9 @@ async function runTicketAi(
 
       decision.route =
         'owner';
+
+      decision.capability =
+        'owner';
     } else if (
       ticket.type ===
       'report'
@@ -3042,6 +3228,22 @@ async function runTicketAi(
 
       decision.route =
         'moderation';
+
+      if (
+        ![
+          'manage_messages',
+          'moderate_members',
+          'kick_members',
+          'ban_members',
+        ].includes(
+          normalizeTicketCapability(
+            decision.capability,
+          ),
+        )
+      ) {
+        decision.capability =
+          'manage_messages';
+      }
     }
 
     const replyText =
@@ -3094,6 +3296,7 @@ async function runTicketAi(
         channel,
         ticket,
         decision.route,
+        decision.capability,
         decision.reason,
       );
     }
@@ -3150,6 +3353,11 @@ async function runTicketAi(
         channel,
         ticket,
         errorRoute,
+        fallbackTicketCapability(
+          ticket,
+          requestText,
+          errorRoute,
+        ),
         `AI support error: ${truncate(error.message, 500)}`,
       ).catch(
         () =>
