@@ -3734,7 +3734,8 @@ async function runTicketAi(
     const testMode =
       isOwner(
         ticket.opener_id,
-      );
+      ) &&
+      !ownerTicketLiveMode;
 
     const context =
       await buildRecentContext(
@@ -3796,6 +3797,9 @@ async function runTicketAi(
             unavailableRoute,
           ),
 
+        action:
+          'none',
+
         reason:
           'AI support unavailable.',
       };
@@ -3835,7 +3839,34 @@ async function runTicketAi(
         );
     }
 
-    if (testMode) {
+    const wantsClose =
+      explicitTicketCloseIntent(
+        requestText,
+      );
+
+    if (
+      decision.action ===
+        'close_ticket' &&
+      !wantsClose
+    ) {
+      decision.action =
+        'none';
+    }
+
+    if (
+      decision.action ===
+        'close_ticket' &&
+      wantsClose
+    ) {
+      decision.needs_human =
+        false;
+
+      decision.route =
+        'none';
+
+      decision.capability =
+        'none';
+    } else if (testMode) {
       decision.needs_human =
         false;
 
@@ -3941,6 +3972,22 @@ async function runTicketAi(
       Date.now(),
       channel.id,
     );
+
+    if (
+      decision.action ===
+        'close_ticket' &&
+      wantsClose
+    ) {
+      await closeTicketByAi(
+        channel,
+        ticket,
+        opener,
+        decision.reason ||
+          'The opener asked to close the resolved ticket.',
+      );
+
+      return;
+    }
 
     if (
       decision.needs_human &&
@@ -6611,8 +6658,11 @@ async function createTicketChannel(
         [
           `${opener}, your ticket is open.`,
           '',
-          isOwner(
-            opener.id,
+          (
+            isOwner(
+              opener.id,
+            ) &&
+            !ownerTicketLiveMode
           )
             ? '**Owner test mode is active.** AI will respond normally, but staff escalation pings are suppressed.'
             : '**AI support will respond first.** If the issue needs a real staff action, the bot will escalate it automatically.',
