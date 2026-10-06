@@ -428,6 +428,22 @@ db.exec(`
     ai_messages INTEGER NOT NULL DEFAULT 0
   );
 
+  CREATE TABLE IF NOT EXISTS ticket_ai_reviews (
+    channel_id TEXT PRIMARY KEY,
+
+    review_channel_id TEXT NOT NULL,
+
+    review_message_id TEXT NOT NULL,
+
+    status TEXT NOT NULL DEFAULT 'pending',
+
+    closed_at INTEGER NOT NULL,
+
+    reviewed_by TEXT,
+
+    reviewed_at INTEGER
+  );
+
   CREATE TABLE IF NOT EXISTS stickies (
     channel_id TEXT PRIMARY KEY,
 
@@ -1015,6 +1031,44 @@ const sql = {
       WHERE channel_id = ?
     `),
 
+  setTicketAiReview:
+    db.prepare(`
+      INSERT OR REPLACE
+      INTO ticket_ai_reviews (
+        channel_id,
+        review_channel_id,
+        review_message_id,
+        status,
+        closed_at,
+        reviewed_by,
+        reviewed_at
+      )
+
+      VALUES (
+        ?, ?, ?, 'pending', ?, NULL, NULL
+      )
+    `),
+
+  getTicketAiReview:
+    db.prepare(`
+      SELECT *
+      FROM ticket_ai_reviews
+
+      WHERE channel_id = ?
+    `),
+
+  finishTicketAiReview:
+    db.prepare(`
+      UPDATE ticket_ai_reviews
+
+      SET
+        status = ?,
+        reviewed_by = ?,
+        reviewed_at = ?
+
+      WHERE channel_id = ?
+    `),
+
   getSticky:
     db.prepare(`
       SELECT *
@@ -1236,6 +1290,9 @@ const ticketAiLocks =
 
 const ticketAiPending =
   new Map();
+
+let ownerTicketLiveMode =
+  false;
 
 const stickyTimers =
   new Map();
