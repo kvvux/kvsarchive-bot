@@ -2445,6 +2445,53 @@ function normalizeTicketCapability(
       : 'none';
 }
 
+function normalizeTicketAction(
+  action,
+) {
+  const value =
+    String(
+      action ||
+      '',
+    )
+      .trim()
+      .toLowerCase();
+
+  return [
+    'none',
+    'close_ticket',
+  ].includes(
+    value,
+  )
+    ? value
+    : 'none';
+}
+
+function explicitTicketCloseIntent(
+  text,
+) {
+  const value =
+    String(
+      text ||
+      '',
+    )
+      .toLowerCase();
+
+  return (
+    /\b(close|end|archive)\b.{0,30}\b(ticket|this)\b/i
+      .test(
+        value,
+      ) ||
+    /\b(ticket|this)\b.{0,30}\b(close|end|archive)\b/i
+      .test(
+        value,
+      ) ||
+    /\b(close it|close this|you can close|can close now|please close|resolved.*close|fixed.*close)\b/i
+      .test(
+        value,
+      )
+  );
+}
+
 function parseTicketAiJson(
   raw,
   fallbackRoute = 'none',
@@ -2518,6 +2565,9 @@ function parseTicketAiJson(
       capability:
         fallbackCapability,
 
+      action:
+        'none',
+
       reason:
         'AI response was not structured.',
     };
@@ -2531,6 +2581,11 @@ function parseTicketAiJson(
   const capability =
     normalizeTicketCapability(
       parsed.capability,
+    );
+
+  const action =
+    normalizeTicketAction(
+      parsed.action,
     );
 
   return {
@@ -2565,6 +2620,8 @@ function parseTicketAiJson(
       )
         ? fallbackCapability
         : capability,
+
+    action,
 
     reason:
       truncate(
@@ -2737,9 +2794,12 @@ function ticketAiInstructions() {
     '- owner: purchases, paid roles, refunds, money, ownership-only requests, or anything explicitly requiring the server owner.',
     'Also choose the minimum capability the human needs: none, manage_roles, manage_messages, moderate_members, kick_members, ban_members, manage_guild, or owner.',
     'Examples: manual verification -> verification + manage_roles; timeout -> moderation + moderate_members; kick -> moderation + kick_members; ban -> moderation + ban_members; normal report review -> moderation + manage_messages; server configuration -> management + manage_guild; paid role/refund -> owner + owner.',
-    'If test_mode is true, respond as if testing the workflow but ALWAYS output route none, capability none, and needs_human false. Never request or imply a staff ping.',
+    'You also have one safe ticket action: close_ticket.',
+    'Use action close_ticket ONLY when the ticket opener explicitly asks you to close/end/archive the ticket and the conversation appears resolved or they clearly want to stop. Otherwise action must be none.',
+    'Never use close_ticket merely because you think the issue is finished.',
+    'If test_mode is true, respond as if testing the workflow but ALWAYS output route none, capability none, and needs_human false. Ticket close actions may still be tested.',
     'Return ONLY valid JSON. No markdown fence.',
-    'Schema: {"reply":"message for the ticket opener","needs_human":false,"route":"none","capability":"none","reason":"short internal reason"}',
+    'Schema: {"reply":"message for the ticket opener","needs_human":false,"route":"none","capability":"none","action":"none","reason":"short internal reason"}',
   ].join(
     ' ',
   );
