@@ -3544,7 +3544,7 @@ async function handleVerifyButton(
       ephemeral({
         embeds: [
           errorEmbed(
-            'I could not DM you. enable server DMs and try again.',
+            `I could not DM you. Enable server DMs and try again, or open **Verification Help** in <#${CONFIG.CHANNELS.TICKETS}>.`,
           ),
         ],
       }),
@@ -8519,6 +8519,18 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
+    .setName('support')
+    .setDescription('open a private general support ticket'),
+
+  new SlashCommandBuilder()
+    .setName('report')
+    .setDescription('open a private member report ticket'),
+
+  new SlashCommandBuilder()
+    .setName('verifyhelp')
+    .setDescription('get staff help with verification'),
+
+  new SlashCommandBuilder()
     .setName('roleinfo')
     .setDescription('show role information')
     .addRoleOption((option) =>
@@ -10411,7 +10423,7 @@ async function handleSlashCommand(
     const lines = [
       '**community**',
 
-      '`/ask` `/level` `/leaderboard` `/mediastats` `/avatar` `/banner` `/userinfo` `/serverinfo` `/roleinfo` `/username`',
+      '`/ask` `/level` `/leaderboard` `/mediastats` `/avatar` `/banner` `/userinfo` `/serverinfo` `/roleinfo` `/username`\n\n`/support` `/report` `/verifyhelp`',
 
       '`/pickup` `/ping` `/uptime`',
 
@@ -11247,6 +11259,43 @@ async function handleSlashCommand(
           }),
       ],
     });
+  }
+
+  // --------------------------------------------------------------------------
+  // DIRECT SUPPORT SHORTCUTS
+  // --------------------------------------------------------------------------
+
+  if (
+    name ===
+    'support'
+  ) {
+    return interaction.showModal(
+      ticketModal(
+        'support',
+      ),
+    );
+  }
+
+  if (
+    name ===
+    'report'
+  ) {
+    return interaction.showModal(
+      ticketModal(
+        'report',
+      ),
+    );
+  }
+
+  if (
+    name ===
+    'verifyhelp'
+  ) {
+    return interaction.showModal(
+      ticketModal(
+        'verify',
+      ),
+    );
   }
 
   // --------------------------------------------------------------------------
