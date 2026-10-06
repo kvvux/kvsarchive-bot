@@ -2849,20 +2849,56 @@ async function findTicketEscalationTarget(
   if (
     candidates.length
   ) {
-    return {
-      kind:
-        'role',
+    const chosen =
+      candidates[
+        0
+      ];
 
-      id:
-        candidates[
-          0
-        ].id,
+    const botCanMentionRoles =
+      guild.members.me
+        ?.permissions
+        .has(
+          PermissionFlagsBits
+            .MentionEveryone,
+        ) ||
+      false;
 
-      label:
-        candidates[
-          0
-        ].name,
-    };
+    if (
+      chosen.mentionable ||
+      botCanMentionRoles
+    ) {
+      return {
+        kind:
+          'role',
+
+        id:
+          chosen.id,
+
+        label:
+          chosen.name,
+      };
+    }
+
+    const human =
+      chosen.members
+        .filter(
+          (member) =>
+            !member.user.bot,
+        )
+        .first();
+
+    if (human) {
+      return {
+        kind:
+          'user',
+
+        id:
+          human.id,
+
+        label:
+          `${human.user.tag} (${chosen.name})`,
+      };
+    }
   }
 
   return {
