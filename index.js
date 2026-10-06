@@ -3302,17 +3302,6 @@ function ticketReviewControls(
           .setStyle(
             ButtonStyle.Secondary,
           ),
-
-        new ButtonBuilder()
-          .setCustomId(
-            `ticketreview_escalate_${channelId}`,
-          )
-          .setLabel(
-            'Escalate',
-          )
-          .setStyle(
-            ButtonStyle.Danger,
-          ),
       ),
   ];
 }
@@ -3347,6 +3336,9 @@ async function closeTicketByAi(
     .edit(
       ticket.opener_id,
       {
+        ViewChannel:
+          false,
+
         SendMessages:
           false,
       },
@@ -3426,7 +3418,7 @@ async function closeTicketByAi(
               `**type:** ${ticket.type}`,
               '',
               'The AI closed this ticket without human confirmation.',
-              'Review the transcript, then approve/delete it, reopen it, or escalate it.',
+              'Review the transcript, then **Approve & Delete** it or **Reopen** it.',
             ].join(
               '\n',
             ),
@@ -3478,7 +3470,7 @@ async function handleTicketReviewButton(
   const match =
     interaction.customId
       .match(
-        /^ticketreview_(approve|reopen|escalate)_(\d+)$/,
+        /^ticketreview_(approve|reopen)_(\d+)$/,
       );
 
   if (!match) {
@@ -3496,7 +3488,7 @@ async function handleTicketReviewButton(
     ];
 
   const member =
-    await requireStaff(
+    await requireTicketStaff(
       interaction,
     );
 
@@ -3617,6 +3609,9 @@ async function handleTicketReviewButton(
       .edit(
         ticket.opener_id,
         {
+          ViewChannel:
+            true,
+
           SendMessages:
             true,
         },
@@ -3677,93 +3672,6 @@ async function handleTicketReviewButton(
     });
   }
 
-  if (
-    action ===
-    'escalate'
-  ) {
-    const route =
-      ticket.type ===
-        'verify'
-        ? 'verification'
-        : (
-          ticket.type ===
-            'purchase' ||
-          ticket.type ===
-            'owner'
-            ? 'owner'
-            : 'moderation'
-        );
-
-    const capability =
-      fallbackTicketCapability(
-        ticket,
-        'human review escalation',
-        route,
-      );
-
-    await channel.permissionOverwrites
-      .edit(
-        ticket.opener_id,
-        {
-          SendMessages:
-            true,
-        },
-        {
-          reason:
-            `AI close escalated by ${member.user.tag}`,
-        },
-      )
-      .catch(
-        () =>
-          null,
-      );
-
-    await channel
-      .setName(
-        channel.name
-          .replace(
-            /^ai-closed-/,
-            '',
-          )
-          .slice(
-            0,
-            100,
-          ),
-      )
-      .catch(
-        () =>
-          null,
-      );
-
-    await escalateTicket(
-      channel,
-      ticket,
-      route,
-      capability,
-      `Human reviewer ${member.user.tag} escalated an AI-closed ticket after transcript review.`,
-    );
-
-    sql.finishTicketAiReview.run(
-      'escalated',
-      member.id,
-      Date.now(),
-      channelId,
-    );
-
-    return interaction.update({
-      embeds: [
-        baseEmbed()
-          .setTitle(
-            '⚠ AI ticket review // escalated',
-          )
-          .setDescription(
-            `${member} escalated <#${channelId}> for human handling.`,
-          ),
-      ],
-
-      components: [],
-    });
-  }
 }
 
 async function runTicketAi(
@@ -6525,7 +6433,17 @@ async function createTicketChannel(
             null,
         );
 
-    if (channel) {
+    if (
+      channel &&
+      !channel.name
+        .startsWith(
+          'closed-',
+        ) &&
+      !channel.name
+        .startsWith(
+          'ai-closed-',
+        )
+    ) {
       return interaction.reply(
         ephemeral({
           content:
@@ -6534,13 +6452,15 @@ async function createTicketChannel(
       );
     }
 
-    sql.deleteTicket.run(
-      existing.channel_id,
-    );
+    if (!channel) {
+      sql.deleteTicket.run(
+        existing.channel_id,
+      );
 
-    sql.deleteTicketAiState.run(
-      existing.channel_id,
-    );
+      sql.deleteTicketAiState.run(
+        existing.channel_id,
+      );
+    }
   }
 
   const ticketWait =
