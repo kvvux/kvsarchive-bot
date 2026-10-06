@@ -9481,8 +9481,8 @@ async function doctorReport(
   lines.push(
     process.env
       .OPENAI_API_KEY
-      ? `✅ generative AI configured — \`${CONFIG.AI.MODEL}\``
-      : '❌ OPENAI_API_KEY is missing — /ask and AI staff review will not be generative',
+      ? `✅ generative AI configured — \`${CONFIG.AI.MODEL}\` — AI ticket support active`
+      : '⚠️ OPENAI_API_KEY is missing — /ask is unavailable and tickets will fall back directly to human routing',
   );
 
   const category =
@@ -9769,6 +9769,60 @@ async function doctorReport(
       )
         ? '✅ support is visible before verification'
         : '⚠️ support may be hidden from unverified members — run /setup tickets or restart the bot',
+    );
+  }
+
+  try {
+    const routeChecks = [
+      [
+        'verification',
+        'manage_roles',
+      ],
+      [
+        'moderation',
+        'manage_messages',
+      ],
+      [
+        'moderation',
+        'moderate_members',
+      ],
+      [
+        'moderation',
+        'ban_members',
+      ],
+      [
+        'management',
+        'manage_guild',
+      ],
+      [
+        'owner',
+        'owner',
+      ],
+    ];
+
+    for (
+      const [
+        route,
+        capability,
+      ]
+      of routeChecks
+    ) {
+      const target =
+        await findTicketEscalationTarget(
+          guild,
+          route,
+          capability,
+        );
+
+      lines.push(
+        `✅ ticket route ${route}/${capability} → ${target.kind === 'role' ? '@' : ''}${target.label} (${target.id})`,
+      );
+    }
+  } catch (
+    error
+  ) {
+    lines.push(
+      `⚠️ ticket escalation routing diagnostic failed: ${truncate(error.message, 500)}`,
     );
   }
 
