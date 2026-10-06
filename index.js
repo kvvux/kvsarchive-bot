@@ -3062,8 +3062,11 @@ async function escalateTicket(
   if (
     normalized ===
       'none' ||
-    isOwner(
-      ticket.opener_id,
+    (
+      isOwner(
+        ticket.opener_id,
+      ) &&
+      !ownerTicketLiveMode
     )
   ) {
     return false;
@@ -4010,10 +4013,14 @@ async function runTicketAi(
       error,
     );
 
-    const fallbackRoute =
+    const ownerSafeMode =
       isOwner(
         ticket.opener_id,
-      )
+      ) &&
+      !ownerTicketLiveMode;
+
+    const fallbackRoute =
+      ownerSafeMode
         ? 'none'
         : (
           fallbackTicketRoute(
@@ -4024,9 +4031,7 @@ async function runTicketAi(
         );
 
     const errorRoute =
-      isOwner(
-        ticket.opener_id,
-      )
+      ownerSafeMode
         ? 'none'
         : (
           fallbackRoute ===
