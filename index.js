@@ -3212,6 +3212,203 @@ async function escalateTicket(
   return true;
 }
 
+function ticketReviewControls(
+  channelId,
+) {
+  return [
+    new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            `ticketreview_approve_${channelId}`,
+          )
+          .setLabel(
+            'Approve & Delete',
+          )
+          .setStyle(
+            ButtonStyle.Success,
+          ),
+
+        new ButtonBuilder()
+          .setCustomId(
+            `ticketreview_reopen_${channelId}`,
+          )
+          .setLabel(
+            'Reopen',
+          )
+          .setStyle(
+            ButtonStyle.Secondary,
+          ),
+
+        new ButtonBuilder()
+          .setCustomId(
+            `ticketreview_escalate_${channelId}`,
+          )
+          .setLabel(
+            'Escalate',
+          )
+          .setStyle(
+            ButtonStyle.Danger,
+          ),
+      ),
+  ];
+}
+
+async function closeTicketByAi(
+  channel,
+  ticket,
+  opener,
+  reason,
+) {
+  const current =
+    sql.getTicket.get(
+      channel.id,
+    );
+
+  if (
+    !current ||
+    current.claimed_by ||
+    channel.name
+      .startsWith(
+        'ai-closed-',
+      ) ||
+    channel.name
+      .startsWith(
+        'closed-',
+      )
+  ) {
+    return false;
+  }
+
+  await channel.permissionOverwrites
+    .edit(
+      ticket.opener_id,
+      {
+        SendMessages:
+          false,
+      },
+      {
+        reason:
+          'AI-resolved ticket awaiting human review',
+      },
+    )
+    .catch(
+      () =>
+        null,
+    );
+
+  if (
+    !channel.name
+      .startsWith(
+        'ai-closed-',
+      )
+  ) {
+    await channel
+      .setName(
+        `ai-closed-${channel.name}`
+          .slice(
+            0,
+            100,
+          ),
+      )
+      .catch(
+        () =>
+          null,
+      );
+  }
+
+  await channel.send({
+    embeds: [
+      baseEmbed()
+        .setTitle(
+          '⌁ AI closed // review pending',
+        )
+        .setDescription(
+          [
+            `${opener}, this ticket was closed by AI because you requested it.`,
+            '',
+            '**It has NOT been deleted.** A human staff member must review the transcript first.',
+            '',
+            `**AI close reason:** ${truncate(reason, 900)}`,
+          ].join(
+            '\n',
+          ),
+        ),
+    ],
+  });
+
+  const transcript =
+    await buildTranscript(
+      channel,
+    );
+
+  const reviewChannel =
+    await checkTextChannel(
+      channel.guild,
+      CONFIG.CHANNELS
+        .SERVER_LOGS,
+    );
+
+  const reviewMessage =
+    await reviewChannel.send({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '⌁ AI ticket review required',
+          )
+          .setDescription(
+            [
+              `**ticket:** <#${channel.id}>`,
+              `**opener:** <@${ticket.opener_id}> (${ticket.opener_id})`,
+              `**type:** ${ticket.type}`,
+              '',
+              'The AI closed this ticket without human confirmation.',
+              'Review the transcript, then approve/delete it, reopen it, or escalate it.',
+            ].join(
+              '\n',
+            ),
+          ),
+      ],
+
+      files: [
+        new AttachmentBuilder(
+          transcript,
+          {
+            name:
+              `${sanitizeChannelName(channel.name)}-ai-review-transcript.txt`,
+          },
+        ),
+      ],
+
+      components:
+        ticketReviewControls(
+          channel.id,
+        ),
+
+      allowedMentions: {
+        parse: [],
+      },
+    });
+
+  sql.setTicketAiReview.run(
+    channel.id,
+    reviewChannel.id,
+    reviewMessage.id,
+    Date.now(),
+  );
+
+  ticketAiPending.delete(
+    channel.id,
+  );
+
+  await logEvent(
+    'AI ticket closed',
+    `<#${channel.id}> was closed by AI and queued for human transcript review.`,
+  );
+
+  return true;
+}
+
 async function runTicketAi(
   channel,
   ticket,
