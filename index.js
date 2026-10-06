@@ -9578,6 +9578,49 @@ async function postPanel(
       id,
     );
 
+  const panelTitle =
+    payload.embeds?.[
+      0
+    ]?.data?.title ||
+    null;
+
+  if (
+    panelTitle &&
+    channel.messages
+      ?.fetch
+  ) {
+    const recent =
+      await channel.messages
+        .fetch({
+          limit:
+            50,
+        })
+        .catch(
+          () =>
+            null,
+        );
+
+    const existing =
+      recent
+        ?.find(
+          (message) =>
+            message.author.id ===
+              client.user.id &&
+            message.embeds?.[
+              0
+            ]?.title ===
+              panelTitle,
+        );
+
+    if (existing) {
+      await existing.edit(
+        payload,
+      );
+
+      return channel;
+    }
+  }
+
   await channel.send(
     payload,
   );
