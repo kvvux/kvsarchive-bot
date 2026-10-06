@@ -3409,6 +3409,266 @@ async function closeTicketByAi(
   return true;
 }
 
+async function handleTicketReviewButton(
+  interaction,
+) {
+  const match =
+    interaction.customId
+      .match(
+        /^ticketreview_(approve|reopen|escalate)_(\d+)$/,
+      );
+
+  if (!match) {
+    return;
+  }
+
+  const action =
+    match[
+      1
+    ];
+
+  const channelId =
+    match[
+      2
+    ];
+
+  const member =
+    await requireStaff(
+      interaction,
+    );
+
+  if (!member) {
+    return;
+  }
+
+  const review =
+    sql.getTicketAiReview.get(
+      channelId,
+    );
+
+  if (
+    !review ||
+    review.status !==
+      'pending'
+  ) {
+    return interaction.reply(
+      ephemeral({
+        content:
+          'this AI-closed ticket has already been reviewed.',
+      }),
+    );
+  }
+
+  const ticket =
+    sql.getTicket.get(
+      channelId,
+    );
+
+  const channel =
+    await interaction.guild.channels
+      .fetch(
+        channelId,
+      )
+      .catch(
+        () =>
+          null,
+      );
+
+  if (
+    action ===
+    'approve'
+  ) {
+    sql.finishTicketAiReview.run(
+      'approved',
+      member.id,
+      Date.now(),
+      channelId,
+    );
+
+    if (ticket) {
+      sql.deleteTicket.run(
+        channelId,
+      );
+
+      sql.deleteTicketAiState.run(
+        channelId,
+      );
+    }
+
+    ticketAiPending.delete(
+      channelId,
+    );
+
+    await interaction.update({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '† AI ticket review approved',
+          )
+          .setDescription(
+            `${member} reviewed the transcript and approved deletion of <#${channelId}>.`,
+          ),
+      ],
+
+      components: [],
+    });
+
+    await logEvent(
+      'AI ticket review approved',
+      `${member.user.tag} approved and deleted AI-closed ticket ${channelId}.`,
+    );
+
+    if (channel) {
+      setTimeout(
+        () =>
+          channel.delete(
+            `AI close reviewed and approved by ${member.user.tag}`,
+          ).catch(
+            () =>
+              null,
+          ),
+        1500,
+      ).unref();
+    }
+
+    return;
+  }
+
+  if (
+    !ticket ||
+    !channel
+  ) {
+    return interaction.reply(
+      ephemeral({
+        content:
+          'the original ticket channel no longer exists.',
+      }),
+    );
+  }
+
+  if (
+    action ===
+    'reopen'
+  ) {
+    await channel.permissionOverwrites
+      .edit(
+        ticket.opener_id,
+        {
+          SendMessages:
+            true,
+        },
+        {
+          reason:
+            `AI close rejected by ${member.user.tag}`,
+        },
+      );
+
+    await channel
+      .setName(
+        channel.name
+          .replace(
+            /^ai-closed-/,
+            '',
+          )
+          .slice(
+            0,
+            100,
+          ),
+      )
+      .catch(
+        () =>
+          null,
+      );
+
+    sql.finishTicketAiReview.run(
+      'reopened',
+      member.id,
+      Date.now(),
+      channelId,
+    );
+
+    await channel.send({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '⌁ ticket reopened',
+          )
+          .setDescription(
+            `${member} reviewed the AI closure and reopened this ticket.`,
+          ),
+      ],
+    });
+
+    return interaction.update({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '⌁ AI ticket review // reopened',
+          )
+          .setDescription(
+            `${member} reopened <#${channelId}> after reviewing the transcript.`,
+          ),
+      ],
+
+      components: [],
+    });
+  }
+
+  if (
+    action ===
+    'escalate'
+  ) {
+    const route =
+      ticket.type ===
+        'verify'
+        ? 'verification'
+        : (
+          ticket.type ===
+            'purchase' ||
+          ticket.type ===
+            'owner'
+            ? 'owner'
+            : 'moderation'
+        );
+
+    const capability =
+      fallbackTicketCapability(
+        ticket,
+        'human review escalation',
+        route,
+      );
+
+    await escalateTicket(
+      channel,
+      ticket,
+      route,
+      capability,
+      `Human reviewer ${member.user.tag} escalated an AI-closed ticket after transcript review.`,
+    );
+
+    sql.finishTicketAiReview.run(
+      'escalated',
+      member.id,
+      Date.now(),
+      channelId,
+    );
+
+    return interaction.update({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '⚠ AI ticket review // escalated',
+          )
+          .setDescription(
+            `${member} escalated <#${channelId}> for human handling.`,
+          ),
+      ],
+
+      components: [],
+    });
+  }
+}
+
 async function runTicketAi(
   channel,
   ticket,
