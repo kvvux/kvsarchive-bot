@@ -2955,19 +2955,28 @@ async function runTicketAi(
       !process.env
         .OPENAI_API_KEY
     ) {
+      const unavailableRoute =
+        testMode
+          ? 'none'
+          : (
+            fallbackRoute ===
+              'none'
+              ? 'moderation'
+              : fallbackRoute
+          );
+
       decision = {
         reply:
-          fallbackRoute ===
-            'none'
-            ? 'The AI support service is temporarily unavailable. A human can still help if this needs staff action.'
-            : 'The AI support service is temporarily unavailable, so I am routing this to the appropriate human staff.',
+          testMode
+            ? 'The AI support service is currently unavailable. This owner test will not ping staff.'
+            : 'The AI support service is temporarily unavailable, so I am routing this to a human instead of leaving the ticket unanswered.',
 
         needs_human:
-          fallbackRoute !==
+          unavailableRoute !==
           'none',
 
         route:
-          fallbackRoute,
+          unavailableRoute,
 
         reason:
           'AI support unavailable.',
@@ -3013,6 +3022,26 @@ async function runTicketAi(
 
       decision.route =
         'none';
+    } else if (
+      ticket.type ===
+        'purchase' ||
+      ticket.type ===
+        'owner'
+    ) {
+      decision.needs_human =
+        true;
+
+      decision.route =
+        'owner';
+    } else if (
+      ticket.type ===
+      'report'
+    ) {
+      decision.needs_human =
+        true;
+
+      decision.route =
+        'moderation';
     }
 
     const replyText =
@@ -3081,10 +3110,25 @@ async function runTicketAi(
         ticket.opener_id,
       )
         ? 'none'
-        : fallbackTicketRoute(
+        : (
+          fallbackTicketRoute(
             ticket,
             requestText,
-          );
+          ) ||
+          'moderation'
+        );
+
+    const errorRoute =
+      isOwner(
+        ticket.opener_id,
+      )
+        ? 'none'
+        : (
+          fallbackRoute ===
+            'none'
+            ? 'moderation'
+            : fallbackRoute
+        );
 
     await channel.send({
       content:
@@ -3099,13 +3143,13 @@ async function runTicketAi(
     );
 
     if (
-      fallbackRoute !==
+      errorRoute !==
       'none'
     ) {
       await escalateTicket(
         channel,
         ticket,
-        fallbackRoute,
+        errorRoute,
         `AI support error: ${truncate(error.message, 500)}`,
       ).catch(
         () =>
@@ -5964,6 +6008,52 @@ async function handleTicketButton(
         ephemeral({
           content:
             `${opener} is already verified.`,
+        }),
+      );
+    }
+
+    const targetRolePosition =
+      Math.max(
+        interaction.guild.roles.cache
+          .get(
+            CONFIG.ROLES.VERIFY,
+          )
+          ?.position ||
+          0,
+
+        interaction.guild.roles.cache
+          .get(
+            CONFIG.ROLES.MEMBER,
+          )
+          ?.position ||
+          0,
+      );
+
+    const canManageVerification =
+      isOwner(
+        member.id,
+      ) ||
+      (
+        member.permissions
+          .has(
+            PermissionFlagsBits
+              .ManageRoles,
+          ) &&
+        member.roles.highest
+          .position >
+          targetRolePosition
+      );
+
+    if (
+      !canManageVerification
+    ) {
+      return interaction.reply(
+        ephemeral({
+          embeds: [
+            errorEmbed(
+              'you can view this ticket, but your staff role does not have enough role-management permission to manually verify this member.',
+            ),
+          ],
         }),
       );
     }
