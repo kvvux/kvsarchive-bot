@@ -113,6 +113,11 @@ const CONFIG = {
   VERIFICATION: {
     EXPIRE_MS: 10 * 60_000,
     MAX_ATTEMPTS: 5,
+    BUTTON_COOLDOWN_MS: 15_000,
+  },
+
+  TICKETS: {
+    OPEN_COOLDOWN_MS: 45_000,
   },
 
   LEVELING: {
@@ -1046,6 +1051,20 @@ const sql = {
       WHERE user_id = ?
     `),
 
+  allTickets:
+    db.prepare(`
+      SELECT *
+      FROM tickets
+    `),
+
+  deleteExpiredVerifyCodes:
+    db.prepare(`
+      DELETE
+      FROM verification_codes
+
+      WHERE expires_at < ?
+    `),
+
   getDrop:
     db.prepare(`
       SELECT *
@@ -1134,6 +1153,12 @@ const spamTracker =
   new Map();
 
 const aiCooldowns =
+  new Map();
+
+const verificationCooldowns =
+  new Map();
+
+const ticketOpenCooldowns =
   new Map();
 
 const stickyTimers =
@@ -1346,6 +1371,37 @@ function durationText(
       hours /
       24,
     )}d`
+  );
+}
+
+function cooldownRemaining(
+  map,
+  id,
+  windowMs,
+) {
+  const last =
+    map.get(
+      id,
+    ) ||
+    0;
+
+  return Math.max(
+    0,
+    windowMs -
+      (
+        Date.now() -
+        last
+      ),
+  );
+}
+
+function markCooldown(
+  map,
+  id,
+) {
+  map.set(
+    id,
+    Date.now(),
   );
 }
 
@@ -3512,6 +3568,31 @@ async function handleVerifyButton(
     );
   }
 
+  const verifyWait =
+    cooldownRemaining(
+      verificationCooldowns,
+      interaction.user.id,
+      CONFIG.VERIFICATION
+        .BUTTON_COOLDOWN_MS,
+    );
+
+  if (
+    verifyWait >
+    0
+  ) {
+    return interaction.reply(
+      ephemeral({
+        content:
+          `wait **${Math.ceil(verifyWait / 1000)}s** before requesting another verification code.`,
+      }),
+    );
+  }
+
+  markCooldown(
+    verificationCooldowns,
+    interaction.user.id,
+  );
+
   const code =
     verificationCode();
 
@@ -3544,7 +3625,7 @@ async function handleVerifyButton(
       ephemeral({
         embeds: [
           errorEmbed(
-            'I could not DM you. enable server DMs and try again.',
+            `I could not DM you. Enable server DMs and try again, or open **Verification Help** in <#${CONFIG.CHANNELS.TICKETS}>.`,
           ),
         ],
       }),
@@ -3584,11 +3665,10 @@ function welcomeEmbed(
           `› read <#${CONFIG.CHANNELS.RULES}>`,
           `› talk in <#${CONFIG.CHANNELS.CHAT}>`,
           `› commands in <#${CONFIG.CHANNELS.CMDS}>`,
-          `› pfps in <#${CONFIG.CHANNELS.PFP}>`,
-          `› banners in <#${CONFIG.CHANNELS.BANNER}>`,
+          '› browse the **PFP / media category** for male & female pfps, gifs, banners, anime, manga and more',
+          `› support / verification help in <#${CONFIG.CHANNELS.TICKETS}>`,
           '',
-          `**5+** valid PFP posts **or** **5+** valid banner posts unlocks <@&${CONFIG.ROLES.MEDIA_POSTER}>.`,
-          'the categories are counted separately.',
+          `**${CONFIG.MEDIA.REQUIRED_POSTS}+** qualifying PFP posts **or** **${CONFIG.MEDIA.REQUIRED_POSTS}+** qualifying banner posts unlock <@&${CONFIG.ROLES.MEDIA_POSTER}> in the archive media system.`,
         ].join('\n'),
       )
   );
@@ -3647,7 +3727,7 @@ function verifyPanel() {
             'I will DM you a simple **4-digit code**.',
             'Reply with it and your access roles are assigned automatically.',
             '',
-            '*your DMs must be open.*',
+            `If DMs fail or verification breaks, open **Verification Help** in <#${CONFIG.CHANNELS.TICKETS}>. Support is available before you are verified.`,
           ].join('\n'),
         ),
     ],
@@ -3681,6 +3761,9 @@ function ticketPanel() {
           [
             '**Need staff? Open the right ticket below.**',
             '',
+            '**Verification Help**',
+            'Cannot verify, DMs are blocked, or the verification flow is broken? Open this even before you are verified.',
+            '',
             '**Member Report**',
             'Report a member, behaviour issue, or server incident.',
             '',
@@ -3690,7 +3773,7 @@ function ticketPanel() {
             '**Owner Request**',
             'Something specifically intended for ownership / higher staff.',
             '',
-            'Your ticket is private. Other normal members cannot see it.',
+            'Tickets are private. Other normal members cannot see them.',
           ].join('\n'),
         ),
     ],
@@ -3698,6 +3781,17 @@ function ticketPanel() {
     components: [
       new ActionRowBuilder()
         .addComponents(
+          new ButtonBuilder()
+            .setCustomId(
+              'ticket_verify',
+            )
+            .setLabel(
+              'Verification Help',
+            )
+            .setStyle(
+              ButtonStyle.Success,
+            ),
+
           new ButtonBuilder()
             .setCustomId(
               'ticket_report',
@@ -4003,12 +4097,20 @@ function ticketModal(
       );
   }
 
+  const isVerify =
+    type ===
+    'verify';
+
   return modal
     .setTitle(
-      type ===
-        'owner'
-        ? 'owner request'
-        : 'general support',
+      isVerify
+        ? 'verification help'
+        : (
+          type ===
+            'owner'
+            ? 'owner request'
+            : 'general support'
+        ),
     )
     .addComponents(
       new ActionRowBuilder()
@@ -4018,7 +4120,9 @@ function ticketModal(
               'subject',
             )
             .setLabel(
-              'short subject',
+              isVerify
+                ? 'what part of verification failed?'
+                : 'short subject',
             )
             .setStyle(
               TextInputStyle.Short,
@@ -4038,10 +4142,14 @@ function ticketModal(
               'details',
             )
             .setLabel(
-              type ===
-                'owner'
-                ? 'request / reason'
-                : 'what do you need help with?',
+              isVerify
+                ? 'tell staff what happened'
+                : (
+                  type ===
+                    'owner'
+                    ? 'request / reason'
+                    : 'what do you need help with?'
+                ),
             )
             .setStyle(
               TextInputStyle.Paragraph,
@@ -4058,6 +4166,7 @@ function ticketModal(
 
 function ticketControls(
   closed = false,
+  type = '',
 ) {
   if (closed) {
     return [
@@ -4088,7 +4197,7 @@ function ticketControls(
     ];
   }
 
-  return [
+  const row =
     new ActionRowBuilder()
       .addComponents(
         new ButtonBuilder()
@@ -4123,7 +4232,28 @@ function ticketControls(
           .setStyle(
             ButtonStyle.Danger,
           ),
-      ),
+      );
+
+  if (
+    type ===
+    'verify'
+  ) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(
+          'ticket_manual_verify',
+        )
+        .setLabel(
+          'verify member',
+        )
+        .setStyle(
+          ButtonStyle.Success,
+        ),
+    );
+  }
+
+  return [
+    row,
   ];
 }
 
@@ -4361,6 +4491,26 @@ async function createTicketChannel(
     );
   }
 
+  const ticketWait =
+    cooldownRemaining(
+      ticketOpenCooldowns,
+      opener.id,
+      CONFIG.TICKETS
+        .OPEN_COOLDOWN_MS,
+    );
+
+  if (
+    ticketWait >
+    0
+  ) {
+    return interaction.reply(
+      ephemeral({
+        content:
+          `wait **${Math.ceil(ticketWait / 1000)}s** before opening another ticket.`,
+      }),
+    );
+  }
+
   const staffCategory =
     await guild.channels
       .fetch(
@@ -4536,6 +4686,11 @@ async function createTicketChannel(
     Date.now(),
   );
 
+  markCooldown(
+    ticketOpenCooldowns,
+    opener.id,
+  );
+
   const labels = {
     report:
       'Member Report',
@@ -4545,6 +4700,9 @@ async function createTicketChannel(
 
     owner:
       'Owner Request',
+
+    verify:
+      'Verification Help',
   };
 
   const embed =
@@ -4616,6 +4774,7 @@ async function createTicketChannel(
     components:
       ticketControls(
         false,
+        type,
       ),
   });
 
@@ -4694,6 +4853,7 @@ async function handleTicketButton(
 
   if (
     [
+      'verify',
       'report',
       'support',
       'owner',
@@ -4729,6 +4889,117 @@ async function handleTicketButton(
     await getInteractionMember(
       interaction,
     );
+
+  if (
+    action ===
+    'manual_verify'
+  ) {
+    if (
+      ticket.type !==
+      'verify'
+    ) {
+      return interaction.reply(
+        ephemeral({
+          embeds: [
+            errorEmbed(
+              'manual verification is only available in verification-help tickets.',
+            ),
+          ],
+        }),
+      );
+    }
+
+    if (
+      !member ||
+      !isStaff(
+        member,
+      )
+    ) {
+      return interaction.reply(
+        ephemeral({
+          embeds: [
+            errorEmbed(
+              'staff only.',
+            ),
+          ],
+        }),
+      );
+    }
+
+    const opener =
+      await interaction.guild.members
+        .fetch(
+          ticket.opener_id,
+        )
+        .catch(
+          () =>
+            null,
+        );
+
+    if (!opener) {
+      return interaction.reply(
+        ephemeral({
+          embeds: [
+            errorEmbed(
+              'the ticket opener is no longer in the server.',
+            ),
+          ],
+        }),
+      );
+    }
+
+    if (
+      opener.roles.cache
+        .has(
+          CONFIG.ROLES.MEMBER,
+        )
+    ) {
+      return interaction.reply(
+        ephemeral({
+          content:
+            `${opener} is already verified.`,
+        }),
+      );
+    }
+
+    sql.deleteVerifyCode.run(
+      opener.id,
+    );
+
+    try {
+      await completeVerification(
+        opener.id,
+      );
+    } catch (
+      error
+    ) {
+      return interaction.reply(
+        ephemeral({
+          embeds: [
+            errorEmbed(
+              `manual verification failed: ${truncate(error.message, 1000)}`,
+            ),
+          ],
+        }),
+      );
+    }
+
+    await interaction.reply({
+      embeds: [
+        successEmbed(
+          'member verified',
+          `${opener} was manually verified by ${member}.`,
+        ),
+      ],
+    });
+
+    await logEvent(
+      'manual verification',
+      `${member.user.tag} (${member.id}) manually verified ${opener.user.tag} (${opener.id}) through <#${interaction.channelId}>.`,
+    );
+
+    return;
+  }
 
   if (
     action ===
@@ -7130,6 +7401,750 @@ async function handleTttButton(
 }
 
 // ============================================================================
+// SUPPORT ACCESS / COMMUNITY UTILITIES / SERVER ARCHIVE
+// ============================================================================
+
+async function ensurePublicSupportAccess(
+  guild,
+) {
+  const channel =
+    await guild.channels
+      .fetch(
+        CONFIG.CHANNELS
+          .TICKETS,
+      )
+      .catch(
+        () =>
+          null,
+      );
+
+  if (
+    !channel
+      ?.isTextBased()
+  ) {
+    throw new Error(
+      'Tickets channel is missing or not text based.',
+    );
+  }
+
+  const staffIds = [
+    CONFIG.ROLES.MOD,
+    CONFIG.ROLES.SR_MOD,
+    CONFIG.ROLES.ADMIN,
+    CONFIG.ROLES.MANAGEMENT,
+  ];
+
+  await channel.permissionOverwrites
+    .edit(
+      guild.roles.everyone.id,
+      {
+        ViewChannel:
+          true,
+
+        ReadMessageHistory:
+          true,
+
+        SendMessages:
+          false,
+      },
+      {
+        reason:
+          'Keep support available before verification',
+      },
+    );
+
+  await channel.permissionOverwrites
+    .edit(
+      CONFIG.ROLES.VERIFY,
+      {
+        ViewChannel:
+          true,
+
+        ReadMessageHistory:
+          true,
+
+        SendMessages:
+          false,
+      },
+      {
+        reason:
+          'Allow unverified members to reach support',
+      },
+    )
+    .catch(
+      () =>
+        null,
+    );
+
+  for (
+    const roleId
+    of staffIds
+  ) {
+    await channel.permissionOverwrites
+      .edit(
+        roleId,
+        {
+          ViewChannel:
+            true,
+
+          ReadMessageHistory:
+            true,
+
+          SendMessages:
+            true,
+        },
+        {
+          reason:
+            'Staff support access',
+        },
+      )
+      .catch(
+        () =>
+          null,
+      );
+  }
+
+  await channel.permissionOverwrites
+    .edit(
+      CONFIG.OWNER_IDS[0],
+      {
+        ViewChannel:
+          true,
+
+        ReadMessageHistory:
+          true,
+
+        SendMessages:
+          true,
+      },
+      {
+        reason:
+          'Owner support access',
+      },
+    )
+    .catch(
+      () =>
+        null,
+    );
+
+  if (
+    client.user
+  ) {
+    await channel.permissionOverwrites
+      .edit(
+        client.user.id,
+        {
+          ViewChannel:
+            true,
+
+          ReadMessageHistory:
+            true,
+
+          SendMessages:
+            true,
+
+          EmbedLinks:
+            true,
+
+          ManageMessages:
+            true,
+        },
+        {
+          reason:
+            'Bot support panel access',
+        },
+      )
+      .catch(
+        () =>
+          null,
+      );
+  }
+
+  return channel;
+}
+
+const USERNAME_BLOCKLIST = [
+  'ass',
+  'cum',
+  'fag',
+  'kkk',
+  'nig',
+  'sex',
+];
+
+function usernameBlocked(
+  value,
+) {
+  const lowered =
+    value.toLowerCase();
+
+  return USERNAME_BLOCKLIST
+    .some(
+      (blocked) =>
+        lowered.includes(
+          blocked,
+        ),
+    );
+}
+
+function randomFrom(
+  value,
+) {
+  return value[
+    crypto.randomInt(
+      value.length,
+    )
+  ];
+}
+
+function generateUsernameCandidate(
+  length,
+  style,
+) {
+  const vowels =
+    'aeiouy';
+
+  const consonants =
+    'bcdfghjklmnpqrstvwxz';
+
+  const alphabet =
+    'abcdefghijklmnopqrstuvwxyz';
+
+  if (
+    style ===
+    'random'
+  ) {
+    return Array.from(
+      {
+        length,
+      },
+      () =>
+        randomFrom(
+          alphabet,
+        ),
+    ).join('');
+  }
+
+  const patterns =
+    length ===
+      3
+      ? (
+        style ===
+          'clean'
+          ? [
+            'cvc',
+            'vcv',
+            'cvv',
+          ]
+          : [
+            'cvc',
+            'vcv',
+          ]
+      )
+      : (
+        style ===
+          'clean'
+          ? [
+            'cvcv',
+            'vcvc',
+            'cvvc',
+            'cvcc',
+          ]
+          : [
+            'cvcv',
+            'vcvc',
+          ]
+      );
+
+  const pattern =
+    randomFrom(
+      patterns,
+    );
+
+  return pattern
+    .split('')
+    .map(
+      (part) =>
+        randomFrom(
+          part ===
+            'v'
+            ? vowels
+            : consonants,
+        ),
+    )
+    .join('');
+}
+
+function generateUsernames(
+  length,
+  count,
+  style,
+) {
+  const values =
+    new Set();
+
+  let attempts = 0;
+
+  while (
+    values.size <
+      count &&
+    attempts <
+      count * 100
+  ) {
+    attempts++;
+
+    const candidate =
+      generateUsernameCandidate(
+        length,
+        style,
+      );
+
+    if (
+      !usernameBlocked(
+        candidate,
+      )
+    ) {
+      values.add(
+        candidate,
+      );
+    }
+  }
+
+  return [
+    ...values,
+  ];
+}
+
+async function buildServerArchive(
+  guild,
+) {
+  await Promise.all([
+    guild.channels
+      .fetch()
+      .catch(
+        () =>
+          null,
+      ),
+
+    guild.roles
+      .fetch()
+      .catch(
+        () =>
+          null,
+      ),
+
+    guild.members
+      .fetch()
+      .catch(
+        () =>
+          null,
+      ),
+
+    guild.emojis
+      .fetch()
+      .catch(
+        () =>
+          null,
+      ),
+
+    guild.stickers
+      .fetch()
+      .catch(
+        () =>
+          null,
+      ),
+  ]);
+
+  const channels =
+    guild.channels.cache
+      .map(
+        (channel) => ({
+          id:
+            channel.id,
+
+          name:
+            channel.name,
+
+          type:
+            ChannelType[
+              channel.type
+            ] ||
+            String(
+              channel.type,
+            ),
+
+          position:
+            channel.rawPosition ??
+            channel.position ??
+            0,
+
+          parent_id:
+            channel.parentId ||
+            null,
+
+          parent_name:
+            channel.parent
+              ?.name ||
+            null,
+
+          topic:
+            'topic' in
+              channel
+              ? channel.topic
+              : null,
+
+          nsfw:
+            'nsfw' in
+              channel
+              ? Boolean(
+                  channel.nsfw,
+                )
+              : null,
+
+          slowmode_seconds:
+            'rateLimitPerUser' in
+              channel
+              ? channel.rateLimitPerUser
+              : null,
+
+          user_limit:
+            'userLimit' in
+              channel
+              ? channel.userLimit
+              : null,
+
+          bitrate:
+            'bitrate' in
+              channel
+              ? channel.bitrate
+              : null,
+
+          permission_overwrites:
+            channel.permissionOverwrites
+              ?.cache
+              ?.map(
+                (overwrite) => ({
+                  id:
+                    overwrite.id,
+
+                  type:
+                    overwrite.type,
+
+                  allow:
+                    overwrite.allow
+                      .bitfield
+                      .toString(),
+
+                  deny:
+                    overwrite.deny
+                      .bitfield
+                      .toString(),
+                }),
+              ) ||
+            [],
+        }),
+      )
+      .sort(
+        (
+          a,
+          b,
+        ) =>
+          a.position -
+          b.position,
+      );
+
+  const roles =
+    guild.roles.cache
+      .map(
+        (role) => ({
+          id:
+            role.id,
+
+          name:
+            role.name,
+
+          position:
+            role.position,
+
+          color:
+            role.hexColor,
+
+          hoist:
+            role.hoist,
+
+          mentionable:
+            role.mentionable,
+
+          managed:
+            role.managed,
+
+          member_count:
+            role.members.size,
+
+          permissions:
+            role.permissions
+              .bitfield
+              .toString(),
+        }),
+      )
+      .sort(
+        (
+          a,
+          b,
+        ) =>
+          b.position -
+          a.position,
+      );
+
+  const bots =
+    guild.members.cache
+      .filter(
+        (member) =>
+          member.user.bot,
+      )
+      .map(
+        (member) => ({
+          id:
+            member.id,
+
+          tag:
+            member.user.tag,
+
+          display_name:
+            member.displayName,
+
+          roles:
+            member.roles.cache
+              .filter(
+                (role) =>
+                  role.id !==
+                  guild.id,
+              )
+              .map(
+                (role) => ({
+                  id:
+                    role.id,
+
+                  name:
+                    role.name,
+                }),
+              ),
+        }),
+      );
+
+  const data = {
+    generated_at:
+      new Date()
+        .toISOString(),
+
+    guild: {
+      id:
+        guild.id,
+
+      name:
+        guild.name,
+
+      owner_id:
+        guild.ownerId,
+
+      member_count:
+        guild.memberCount,
+
+      verification_level:
+        guild.verificationLevel,
+
+      explicit_content_filter:
+        guild.explicitContentFilter,
+
+      default_notifications:
+        guild.defaultMessageNotifications,
+    },
+
+    config_snapshot: {
+      categories:
+        CONFIG.CATEGORIES,
+
+      roles:
+        CONFIG.ROLES,
+
+      channels:
+        CONFIG.CHANNELS,
+    },
+
+    channels,
+    roles,
+    bots,
+
+    emojis:
+      guild.emojis.cache
+        .map(
+          (emoji) => ({
+            id:
+              emoji.id,
+
+            name:
+              emoji.name,
+
+            animated:
+              emoji.animated,
+          }),
+        ),
+
+    stickers:
+      guild.stickers.cache
+        .map(
+          (sticker) => ({
+            id:
+              sticker.id,
+
+            name:
+              sticker.name,
+          }),
+        ),
+
+    slash_commands:
+      commands.map(
+        (command) =>
+          command.name,
+      ),
+  };
+
+  const categories =
+    channels
+      .filter(
+        (channel) =>
+          channel.type ===
+          'GuildCategory',
+      );
+
+  const uncategorized =
+    channels
+      .filter(
+        (channel) =>
+          channel.type !==
+            'GuildCategory' &&
+          !channel.parent_id,
+      );
+
+  const md = [
+    '# kvsarchive server archive',
+    '',
+    `Generated: ${data.generated_at}`,
+    `Guild: **${guild.name}** — ID ${guild.id}`,
+    `Owner: <@${guild.ownerId}> — ID ${guild.ownerId}`,
+    `Members: **${guild.memberCount}**`,
+    '',
+    '## Categories / channels',
+    '',
+  ];
+
+  for (
+    const category
+    of categories
+  ) {
+    md.push(
+      `### ${category.name} — ID ${category.id}`,
+    );
+
+    for (
+      const channel
+      of channels.filter(
+        (entry) =>
+          entry.parent_id ===
+          category.id,
+      )
+    ) {
+      md.push(
+        `- **${channel.name}** — ${channel.type} — ID ${channel.id}`,
+      );
+    }
+
+    md.push('');
+  }
+
+  if (
+    uncategorized.length
+  ) {
+    md.push(
+      '### Uncategorized',
+    );
+
+    for (
+      const channel
+      of uncategorized
+    ) {
+      md.push(
+        `- **${channel.name}** — ${channel.type} — ID ${channel.id}`,
+      );
+    }
+
+    md.push('');
+  }
+
+  md.push(
+    '## Roles',
+    '',
+  );
+
+  for (
+    const role
+    of roles
+  ) {
+    md.push(
+      `- **${role.name}** — ID ${role.id} — position ${role.position} — members ${role.member_count}`,
+    );
+  }
+
+  md.push(
+    '',
+    '## Bots / apps',
+    '',
+  );
+
+  for (
+    const bot
+    of bots
+  ) {
+    md.push(
+      `- **${bot.tag}** — ID ${bot.id}`,
+    );
+  }
+
+  md.push(
+    '',
+    '## Slash commands',
+    '',
+    commands
+      .map(
+        (command) =>
+          `/${command.name}`,
+      )
+      .join(' · '),
+    '',
+  );
+
+  return {
+    json:
+      Buffer.from(
+        JSON.stringify(
+          data,
+          null,
+          2,
+        ),
+        'utf8',
+      ),
+
+    markdown:
+      Buffer.from(
+        md.join(
+          '\n',
+        ),
+        'utf8',
+      ),
+  };
+}
+
+// ============================================================================
 // DOCTOR
 // ============================================================================
 
@@ -7398,6 +8413,57 @@ async function doctorReport(
     }
   }
 
+  const supportChannel =
+    await guild.channels
+      .fetch(
+        CONFIG.CHANNELS
+          .TICKETS,
+      )
+      .catch(
+        () =>
+          null,
+      );
+
+  if (
+    supportChannel
+      ?.isTextBased()
+  ) {
+    const everyone =
+      supportChannel
+        .permissionOverwrites
+        .cache
+        .get(
+          guild.roles.everyone.id,
+        );
+
+    const verify =
+      supportChannel
+        .permissionOverwrites
+        .cache
+        .get(
+          CONFIG.ROLES.VERIFY,
+        );
+
+    lines.push(
+      (
+        everyone
+          ?.allow
+          .has(
+            PermissionFlagsBits
+              .ViewChannel,
+          ) ||
+        verify
+          ?.allow
+          .has(
+            PermissionFlagsBits
+              .ViewChannel,
+          )
+      )
+        ? '✅ support is visible before verification'
+        : '⚠️ support may be hidden from unverified members — run /setup tickets or restart the bot',
+    );
+  }
+
   return lines;
 }
 
@@ -7511,6 +8577,64 @@ const commands = [
   new SlashCommandBuilder()
     .setName('serverinfo')
     .setDescription('show server information'),
+
+  new SlashCommandBuilder()
+    .setName('username')
+    .setDescription('generate clean 3 or 4 character username ideas')
+    .addIntegerOption((option) =>
+      option
+        .setName('length')
+        .setDescription('username length')
+        .setRequired(true)
+        .addChoices(
+          {
+            name: '3 characters',
+            value: 3,
+          },
+          {
+            name: '4 characters',
+            value: 4,
+          },
+        ),
+    )
+    .addIntegerOption((option) =>
+      option
+        .setName('count')
+        .setDescription('how many ideas')
+        .setMinValue(1)
+        .setMaxValue(25),
+    )
+    .addStringOption((option) =>
+      option
+        .setName('style')
+        .setDescription('generation style')
+        .addChoices(
+          {
+            name: 'clean',
+            value: 'clean',
+          },
+          {
+            name: 'pronounceable',
+            value: 'pronounceable',
+          },
+          {
+            name: 'fully random',
+            value: 'random',
+          },
+        ),
+    ),
+
+  new SlashCommandBuilder()
+    .setName('support')
+    .setDescription('open a private general support ticket'),
+
+  new SlashCommandBuilder()
+    .setName('report')
+    .setDescription('open a private member report ticket'),
+
+  new SlashCommandBuilder()
+    .setName('verifyhelp')
+    .setDescription('get staff help with verification'),
 
   new SlashCommandBuilder()
     .setName('roleinfo')
@@ -8150,6 +9274,11 @@ const commands = [
     .setDefaultMemberPermissions(OWNER_PERM),
 
   new SlashCommandBuilder()
+    .setName('archive-server')
+    .setDescription('owner: export the current server structure and IDs')
+    .setDefaultMemberPermissions(OWNER_PERM),
+
+  new SlashCommandBuilder()
     .setName('say')
     .setDescription('owner: send bot message')
     .setDefaultMemberPermissions(OWNER_PERM)
@@ -8223,6 +9352,52 @@ async function registerGuildCommands() {
   );
 }
 
+async function reconcilePersistentState(
+  guild,
+) {
+  const expired =
+    sql.deleteExpiredVerifyCodes
+      .run(
+        Date.now(),
+      )
+      .changes;
+
+  let staleTickets = 0;
+
+  for (
+    const row
+    of sql.allTickets
+      .all()
+  ) {
+    const channel =
+      await guild.channels
+        .fetch(
+          row.channel_id,
+        )
+        .catch(
+          () =>
+            null,
+        );
+
+    if (!channel) {
+      sql.deleteTicket.run(
+        row.channel_id,
+      );
+
+      staleTickets++;
+    }
+  }
+
+  if (
+    expired ||
+    staleTickets
+  ) {
+    console.log(
+      `[reconcile] expired verification codes: ${expired}; stale tickets removed: ${staleTickets}`,
+    );
+  }
+}
+
 // ============================================================================
 // READY
 // ============================================================================
@@ -8273,6 +9448,19 @@ client.once(
 
     if (guild) {
       try {
+        await reconcilePersistentState(
+          guild,
+        );
+      } catch (
+        error
+      ) {
+        console.error(
+          '[reconcile]',
+          error,
+        );
+      }
+
+      try {
         await ensureStaffResultsPermissions(
           guild,
         );
@@ -8281,6 +9469,19 @@ client.once(
       ) {
         console.error(
           '[staff-results-perms]',
+          error,
+        );
+      }
+
+      try {
+        await ensurePublicSupportAccess(
+          guild,
+        );
+      } catch (
+        error
+      ) {
+        console.error(
+          '[support-perms]',
           error,
         );
       }
@@ -8343,6 +9544,25 @@ client.once(
     );
   },
 );
+
+setInterval(
+  () => {
+    try {
+      sql.deleteExpiredVerifyCodes
+        .run(
+          Date.now(),
+        );
+    } catch (
+      error
+    ) {
+      console.error(
+        '[verification-cleanup]',
+        error,
+      );
+    }
+  },
+  10 * 60_000,
+).unref();
 
 // ============================================================================
 // MEMBER EVENTS
@@ -9387,7 +10607,7 @@ async function handleSlashCommand(
     const lines = [
       '**community**',
 
-      '`/ask` `/level` `/leaderboard` `/mediastats` `/avatar` `/banner` `/userinfo` `/serverinfo` `/roleinfo`',
+      '`/ask` `/level` `/leaderboard` `/mediastats` `/avatar` `/banner` `/userinfo` `/serverinfo` `/roleinfo` `/username`\n\n`/support` `/report` `/verifyhelp`',
 
       '`/pickup` `/ping` `/uptime`',
 
@@ -9442,7 +10662,7 @@ async function handleSlashCommand(
 
         '**owner**',
 
-        '`/setup` `/staffapppost` `/test` `/doctor` `/dropnow` `/xp` `/synclevelroles` `/syncautoroles` `/say` `/embedpost`',
+        '`/setup` `/staffapppost` `/test` `/doctor` `/archive-server` `/dropnow` `/xp` `/synclevelroles` `/syncautoroles` `/say` `/embedpost`',
       );
     }
 
@@ -10164,6 +11384,102 @@ async function handleSlashCommand(
           ),
       ],
     });
+  }
+
+  // --------------------------------------------------------------------------
+  // USERNAME GENERATOR
+  // --------------------------------------------------------------------------
+
+  if (
+    name ===
+    'username'
+  ) {
+    const length =
+      interaction.options
+        .getInteger(
+          'length',
+        );
+
+    const count =
+      interaction.options
+        .getInteger(
+          'count',
+        ) ||
+      10;
+
+    const style =
+      interaction.options
+        .getString(
+          'style',
+        ) ||
+      'clean';
+
+    const values =
+      generateUsernames(
+        length,
+        count,
+        style,
+      );
+
+    return interaction.reply({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            `⌁ ${length}-character username ideas`,
+          )
+          .setDescription(
+            values
+              .map(
+                (value) =>
+                  `\`${value}\``,
+              )
+              .join(
+                '  ',
+              ),
+          )
+          .setFooter({
+            text:
+              'generated ideas only — Discord availability is not checked',
+          }),
+      ],
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // DIRECT SUPPORT SHORTCUTS
+  // --------------------------------------------------------------------------
+
+  if (
+    name ===
+    'support'
+  ) {
+    return interaction.showModal(
+      ticketModal(
+        'support',
+      ),
+    );
+  }
+
+  if (
+    name ===
+    'report'
+  ) {
+    return interaction.showModal(
+      ticketModal(
+        'report',
+      ),
+    );
+  }
+
+  if (
+    name ===
+    'verifyhelp'
+  ) {
+    return interaction.showModal(
+      ticketModal(
+        'verify',
+      ),
+    );
   }
 
   // --------------------------------------------------------------------------
@@ -11436,6 +12752,23 @@ async function handleSlashCommand(
         null,
     );
 
+    await logEvent(
+      'moderation // warning',
+      `${staff.user.tag} warned ${user.tag} — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
+    );
+
     return interaction.reply(
       ephemeral({
         embeds: [
@@ -11831,6 +13164,23 @@ async function handleSlashCommand(
       `${reason} | case #${caseId}`,
     );
 
+    await logEvent(
+      'moderation // timeout',
+      `${staff.user.tag} timed out ${user.tag} for ${minutes}m — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
+    );
+
     return interaction.reply(
       ephemeral({
         embeds: [
@@ -11909,6 +13259,23 @@ async function handleSlashCommand(
       `${reason} | case #${caseId}`,
     );
 
+    await logEvent(
+      'moderation // timeout removed',
+      `${staff.user.tag} removed ${user.tag}'s timeout — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
+    );
+
     return interaction.reply(
       ephemeral({
         embeds: [
@@ -11984,6 +13351,23 @@ async function handleSlashCommand(
 
     await target.kick(
       `${reason} | case #${caseId}`,
+    );
+
+    await logEvent(
+      'moderation // kick',
+      `${staff.user.tag} kicked ${user.tag} — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
     );
 
     return interaction.reply(
@@ -12085,6 +13469,23 @@ async function handleSlashCommand(
         },
       );
 
+    await logEvent(
+      'moderation // ban',
+      `${staff.user.tag} banned ${user.tag} — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
+    );
+
     return interaction.reply(
       ephemeral({
         embeds: [
@@ -12157,12 +13558,13 @@ async function handleSlashCommand(
       );
     }
 
-    createModCase(
-      'unban',
-      userId,
-      staff.id,
-      reason,
-    );
+    const caseId =
+      createModCase(
+        'unban',
+        userId,
+        staff.id,
+        reason,
+      );
 
     await interaction.guild
       .members
@@ -12170,6 +13572,23 @@ async function handleSlashCommand(
         userId,
         reason,
       );
+
+    await logEvent(
+      'moderation // unban',
+      `${staff.user.tag} unbanned ${ban.user.tag} — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
+    );
 
     return interaction.reply(
       ephemeral({
@@ -12458,6 +13877,66 @@ async function handleSlashCommand(
 
   if (
     name ===
+    'archive-server'
+  ) {
+    if (
+      !await requireOwner(
+        interaction,
+      )
+    ) {
+      return;
+    }
+
+    await interaction
+      .deferReply({
+        flags:
+          MessageFlags
+            .Ephemeral,
+      });
+
+    try {
+      const archive =
+        await buildServerArchive(
+          interaction.guild,
+        );
+
+      return interaction.editReply({
+        content:
+          'current server structure exported. Keep these files as the live source of truth for channel / role IDs.',
+
+        files: [
+          new AttachmentBuilder(
+            archive.json,
+            {
+              name:
+                'kvsarchive-server-map.json',
+            },
+          ),
+
+          new AttachmentBuilder(
+            archive.markdown,
+            {
+              name:
+                'kvsarchive-server-map.md',
+            },
+          ),
+        ],
+      });
+    } catch (
+      error
+    ) {
+      return interaction.editReply({
+        embeds: [
+          errorEmbed(
+            `server export failed: ${truncate(error.message, 1500)}`,
+          ),
+        ],
+      });
+    }
+  }
+
+  if (
+    name ===
     'setup'
   ) {
     if (
@@ -12548,6 +14027,15 @@ async function handleSlashCommand(
       of tasks
     ) {
       try {
+        if (
+          label ===
+          'tickets'
+        ) {
+          await ensurePublicSupportAccess(
+            interaction.guild,
+          );
+        }
+
         const channel =
           await postPanel(
             interaction.guild,
@@ -13349,6 +14837,34 @@ async function shutdown(
   console.log(
     `[shutdown] ${signal}`,
   );
+
+  try {
+    if (dropTimer) {
+      clearTimeout(
+        dropTimer,
+      );
+    }
+
+    for (
+      const timer
+      of stickyTimers
+        .values()
+    ) {
+      clearTimeout(
+        timer,
+      );
+    }
+
+    for (
+      const timer
+      of pendingClubDeletes
+        .values()
+    ) {
+      clearTimeout(
+        timer,
+      );
+    }
+  } catch {}
 
   try {
     db.pragma(

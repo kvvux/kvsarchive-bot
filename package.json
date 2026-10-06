@@ -4,7 +4,9 @@
   "private": true,
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "check": "node --check index.js",
+    "test": "npm run check"
   },
   "engines": {
     "node": ">=20"
