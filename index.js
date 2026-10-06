@@ -113,6 +113,11 @@ const CONFIG = {
   VERIFICATION: {
     EXPIRE_MS: 10 * 60_000,
     MAX_ATTEMPTS: 5,
+    BUTTON_COOLDOWN_MS: 15_000,
+  },
+
+  TICKETS: {
+    OPEN_COOLDOWN_MS: 45_000,
   },
 
   LEVELING: {
@@ -1046,6 +1051,20 @@ const sql = {
       WHERE user_id = ?
     `),
 
+  allTickets:
+    db.prepare(`
+      SELECT *
+      FROM tickets
+    `),
+
+  deleteExpiredVerifyCodes:
+    db.prepare(`
+      DELETE
+      FROM verification_codes
+
+      WHERE expires_at < ?
+    `),
+
   getDrop:
     db.prepare(`
       SELECT *
@@ -1134,6 +1153,12 @@ const spamTracker =
   new Map();
 
 const aiCooldowns =
+  new Map();
+
+const verificationCooldowns =
+  new Map();
+
+const ticketOpenCooldowns =
   new Map();
 
 const stickyTimers =
@@ -1346,6 +1371,37 @@ function durationText(
       hours /
       24,
     )}d`
+  );
+}
+
+function cooldownRemaining(
+  map,
+  id,
+  windowMs,
+) {
+  const last =
+    map.get(
+      id,
+    ) ||
+    0;
+
+  return Math.max(
+    0,
+    windowMs -
+      (
+        Date.now() -
+        last
+      ),
+  );
+}
+
+function markCooldown(
+  map,
+  id,
+) {
+  map.set(
+    id,
+    Date.now(),
   );
 }
 
@@ -3512,6 +3568,31 @@ async function handleVerifyButton(
     );
   }
 
+  const verifyWait =
+    cooldownRemaining(
+      verificationCooldowns,
+      interaction.user.id,
+      CONFIG.VERIFICATION
+        .BUTTON_COOLDOWN_MS,
+    );
+
+  if (
+    verifyWait >
+    0
+  ) {
+    return interaction.reply(
+      ephemeral({
+        content:
+          `wait **${Math.ceil(verifyWait / 1000)}s** before requesting another verification code.`,
+      }),
+    );
+  }
+
+  markCooldown(
+    verificationCooldowns,
+    interaction.user.id,
+  );
+
   const code =
     verificationCode();
 
@@ -4410,6 +4491,26 @@ async function createTicketChannel(
     );
   }
 
+  const ticketWait =
+    cooldownRemaining(
+      ticketOpenCooldowns,
+      opener.id,
+      CONFIG.TICKETS
+        .OPEN_COOLDOWN_MS,
+    );
+
+  if (
+    ticketWait >
+    0
+  ) {
+    return interaction.reply(
+      ephemeral({
+        content:
+          `wait **${Math.ceil(ticketWait / 1000)}s** before opening another ticket.`,
+      }),
+    );
+  }
+
   const staffCategory =
     await guild.channels
       .fetch(
@@ -4583,6 +4684,11 @@ async function createTicketChannel(
     opener.id,
     type,
     Date.now(),
+  );
+
+  markCooldown(
+    ticketOpenCooldowns,
+    opener.id,
   );
 
   const labels = {
@@ -9246,6 +9352,52 @@ async function registerGuildCommands() {
   );
 }
 
+async function reconcilePersistentState(
+  guild,
+) {
+  const expired =
+    sql.deleteExpiredVerifyCodes
+      .run(
+        Date.now(),
+      )
+      .changes;
+
+  let staleTickets = 0;
+
+  for (
+    const row
+    of sql.allTickets
+      .all()
+  ) {
+    const channel =
+      await guild.channels
+        .fetch(
+          row.channel_id,
+        )
+        .catch(
+          () =>
+            null,
+        );
+
+    if (!channel) {
+      sql.deleteTicket.run(
+        row.channel_id,
+      );
+
+      staleTickets++;
+    }
+  }
+
+  if (
+    expired ||
+    staleTickets
+  ) {
+    console.log(
+      `[reconcile] expired verification codes: ${expired}; stale tickets removed: ${staleTickets}`,
+    );
+  }
+}
+
 // ============================================================================
 // READY
 // ============================================================================
@@ -9295,6 +9447,19 @@ client.once(
         );
 
     if (guild) {
+      try {
+        await reconcilePersistentState(
+          guild,
+        );
+      } catch (
+        error
+      ) {
+        console.error(
+          '[reconcile]',
+          error,
+        );
+      }
+
       try {
         await ensureStaffResultsPermissions(
           guild,
@@ -9379,6 +9544,25 @@ client.once(
     );
   },
 );
+
+setInterval(
+  () => {
+    try {
+      sql.deleteExpiredVerifyCodes
+        .run(
+          Date.now(),
+        );
+    } catch (
+      error
+    ) {
+      console.error(
+        '[verification-cleanup]',
+        error,
+      );
+    }
+  },
+  10 * 60_000,
+).unref();
 
 // ============================================================================
 // MEMBER EVENTS
@@ -12568,6 +12752,23 @@ async function handleSlashCommand(
         null,
     );
 
+    await logEvent(
+      'moderation // warning',
+      `${staff.user.tag} warned ${user.tag} — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
+    );
+
     return interaction.reply(
       ephemeral({
         embeds: [
@@ -12963,6 +13164,23 @@ async function handleSlashCommand(
       `${reason} | case #${caseId}`,
     );
 
+    await logEvent(
+      'moderation // timeout',
+      `${staff.user.tag} timed out ${user.tag} for ${minutes}m — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
+    );
+
     return interaction.reply(
       ephemeral({
         embeds: [
@@ -13041,6 +13259,23 @@ async function handleSlashCommand(
       `${reason} | case #${caseId}`,
     );
 
+    await logEvent(
+      'moderation // timeout removed',
+      `${staff.user.tag} removed ${user.tag}'s timeout — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
+    );
+
     return interaction.reply(
       ephemeral({
         embeds: [
@@ -13116,6 +13351,23 @@ async function handleSlashCommand(
 
     await target.kick(
       `${reason} | case #${caseId}`,
+    );
+
+    await logEvent(
+      'moderation // kick',
+      `${staff.user.tag} kicked ${user.tag} — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
     );
 
     return interaction.reply(
@@ -13217,6 +13469,23 @@ async function handleSlashCommand(
         },
       );
 
+    await logEvent(
+      'moderation // ban',
+      `${staff.user.tag} banned ${user.tag} — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
+    );
+
     return interaction.reply(
       ephemeral({
         embeds: [
@@ -13289,12 +13558,13 @@ async function handleSlashCommand(
       );
     }
 
-    createModCase(
-      'unban',
-      userId,
-      staff.id,
-      reason,
-    );
+    const caseId =
+      createModCase(
+        'unban',
+        userId,
+        staff.id,
+        reason,
+      );
 
     await interaction.guild
       .members
@@ -13302,6 +13572,23 @@ async function handleSlashCommand(
         userId,
         reason,
       );
+
+    await logEvent(
+      'moderation // unban',
+      `${staff.user.tag} unbanned ${ban.user.tag} — case #${caseId}`,
+      [
+        {
+          name:
+            'reason',
+
+          value:
+            truncate(
+              reason,
+              1000,
+            ),
+        },
+      ],
+    );
 
     return interaction.reply(
       ephemeral({
@@ -14550,6 +14837,34 @@ async function shutdown(
   console.log(
     `[shutdown] ${signal}`,
   );
+
+  try {
+    if (dropTimer) {
+      clearTimeout(
+        dropTimer,
+      );
+    }
+
+    for (
+      const timer
+      of stickyTimers
+        .values()
+    ) {
+      clearTimeout(
+        timer,
+      );
+    }
+
+    for (
+      const timer
+      of pendingClubDeletes
+        .values()
+    ) {
+      clearTimeout(
+        timer,
+      );
+    }
+  } catch {}
 
   try {
     db.pragma(
