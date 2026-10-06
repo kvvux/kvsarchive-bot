@@ -3382,7 +3382,7 @@ async function closeTicketByAi(
           [
             `${opener}, this ticket was closed by AI because you requested it.`,
             '',
-            '**It has NOT been deleted.** A human staff member must review the transcript first.',
+            '**It has NOT been deleted.** A ticket helper or staff member must review it first.',
             '',
             `**AI close reason:** ${truncate(reason, 900)}`,
           ].join(
@@ -3390,6 +3390,11 @@ async function closeTicketByAi(
           ),
         ),
     ],
+
+    components:
+      ticketReviewControls(
+        channel.id,
+      ),
   });
 
   const transcript =
