@@ -11590,6 +11590,38 @@ async function reconcilePersistentState(
       );
 
       staleTickets++;
+    } else if (
+      channel.isTextBased()
+    ) {
+      await channel.permissionOverwrites
+        .edit(
+          CONFIG.ROLES
+            .SUPPORT_TEAM,
+          {
+            ViewChannel:
+              true,
+
+            SendMessages:
+              true,
+
+            ReadMessageHistory:
+              true,
+
+            AttachFiles:
+              true,
+
+            EmbedLinks:
+              true,
+          },
+          {
+            reason:
+              'Support Team ticket access',
+          },
+        )
+        .catch(
+          () =>
+            null,
+        );
     }
   }
 
