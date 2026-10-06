@@ -3641,6 +3641,40 @@ async function handleTicketReviewButton(
         route,
       );
 
+    await channel.permissionOverwrites
+      .edit(
+        ticket.opener_id,
+        {
+          SendMessages:
+            true,
+        },
+        {
+          reason:
+            `AI close escalated by ${member.user.tag}`,
+        },
+      )
+      .catch(
+        () =>
+          null,
+      );
+
+    await channel
+      .setName(
+        channel.name
+          .replace(
+            /^ai-closed-/,
+            '',
+          )
+          .slice(
+            0,
+            100,
+          ),
+      )
+      .catch(
+        () =>
+          null,
+      );
+
     await escalateTicket(
       channel,
       ticket,
@@ -3713,7 +3747,15 @@ async function runTicketAi(
 
   if (
     !freshTicket ||
-    freshTicket.claimed_by
+    freshTicket.claimed_by ||
+    channel.name
+      .startsWith(
+        'closed-',
+      ) ||
+    channel.name
+      .startsWith(
+        'ai-closed-',
+      )
   ) {
     return;
   }
@@ -3930,6 +3972,10 @@ async function runTicketAi(
       channel.name
         .startsWith(
           'closed-',
+        ) ||
+      channel.name
+        .startsWith(
+          'ai-closed-',
         )
     ) {
       return;
