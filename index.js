@@ -7162,6 +7162,23 @@ async function handleTicketButton(
         interaction.channel,
       );
 
+    await interaction.reply({
+      embeds: [
+        baseEmbed()
+          .setTitle(
+            '⌁ ticket closed',
+          )
+          .setDescription(
+            `closed by ${interaction.user}.`,
+          ),
+      ],
+
+      components:
+        ticketControls(
+          true,
+        ),
+    });
+
     await interaction.channel
       .permissionOverwrites
       .edit(
@@ -7203,23 +7220,6 @@ async function handleTicketButton(
             null,
         );
     }
-
-    await interaction.reply({
-      embeds: [
-        baseEmbed()
-          .setTitle(
-            '⌁ ticket closed',
-          )
-          .setDescription(
-            `closed by ${interaction.user}.`,
-          ),
-      ],
-
-      components:
-        ticketControls(
-          true,
-        ),
-    });
 
     await logEvent(
       'ticket closed',
