@@ -6820,7 +6820,7 @@ async function sendTicketTranscript(
 ) {
   if (
     !member ||
-    !isStaff(
+    !isTicketStaff(
       member,
     )
   ) {
@@ -6935,7 +6935,7 @@ async function handleTicketButton(
 
     if (
       !member ||
-      !isStaff(
+      !isTicketStaff(
         member,
       )
     ) {
@@ -7087,7 +7087,7 @@ async function handleTicketButton(
   ) {
     if (
       !member ||
-      !isStaff(
+      !isTicketStaff(
         member,
       )
     ) {
@@ -7140,7 +7140,7 @@ async function handleTicketButton(
           ticket.opener_id ||
         (
           member &&
-          isStaff(
+          isTicketStaff(
             member,
           )
         )
@@ -7167,6 +7167,9 @@ async function handleTicketButton(
       .edit(
         ticket.opener_id,
         {
+          ViewChannel:
+            false,
+
           SendMessages:
             false,
         },
@@ -7240,7 +7243,7 @@ async function handleTicketButton(
   ) {
     if (
       !member ||
-      !isStaff(
+      !isTicketStaff(
         member,
       )
     ) {
