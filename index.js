@@ -10224,6 +10224,12 @@ async function doctorReport(
       : '⚠️ OPENAI_API_KEY is missing — /ask is unavailable and tickets will fall back directly to human routing',
   );
 
+  lines.push(
+    ownerTicketLiveMode
+      ? '⚠️ owner ticket test mode: LIVE — owner tickets can ping real staff'
+      : '✅ owner ticket test mode: SAFE — owner escalation pings suppressed',
+  );
+
   const category =
     await guild.channels
       .fetch(
@@ -12665,6 +12671,17 @@ client.on(
           'staffapp_open'
         ) {
           return startStaffApplication(
+            interaction,
+          );
+        }
+
+        if (
+          interaction.customId
+            .startsWith(
+              'ticketreview_',
+            )
+        ) {
+          return handleTicketReviewButton(
             interaction,
           );
         }
