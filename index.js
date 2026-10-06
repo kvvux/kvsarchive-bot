@@ -11419,6 +11419,31 @@ const commands = [
     .setDefaultMemberPermissions(OWNER_PERM),
 
   new SlashCommandBuilder()
+    .setName('tickettestmode')
+    .setDescription('owner: control owner ticket escalation testing')
+    .setDefaultMemberPermissions(OWNER_PERM)
+    .addStringOption((option) =>
+      option
+        .setName('mode')
+        .setDescription('safe suppresses staff pings; live tests real escalation')
+        .setRequired(true)
+        .addChoices(
+          {
+            name: 'safe',
+            value: 'safe',
+          },
+          {
+            name: 'live',
+            value: 'live',
+          },
+          {
+            name: 'status',
+            value: 'status',
+          },
+        ),
+    ),
+
+  new SlashCommandBuilder()
     .setName('say')
     .setDescription('owner: send bot message')
     .setDefaultMemberPermissions(OWNER_PERM)
@@ -12837,7 +12862,7 @@ async function handleSlashCommand(
 
         '**owner**',
 
-        '`/setup` `/staffapppost` `/test` `/doctor` `/archive-server` `/dropnow` `/xp` `/synclevelroles` `/syncautoroles` `/say` `/embedpost`',
+        '`/setup` `/staffapppost` `/test` `/doctor` `/archive-server` `/tickettestmode` `/dropnow` `/xp` `/synclevelroles` `/syncautoroles` `/say` `/embedpost`',
       );
     }
 
@@ -16038,6 +16063,57 @@ async function handleSlashCommand(
   // ==========================================================================
   // OWNER
   // ==========================================================================
+
+  if (
+    name ===
+    'tickettestmode'
+  ) {
+    if (
+      !await requireOwner(
+        interaction,
+      )
+    ) {
+      return;
+    }
+
+    const mode =
+      interaction.options
+        .getString(
+          'mode',
+        );
+
+    if (
+      mode ===
+      'live'
+    ) {
+      ownerTicketLiveMode =
+        true;
+    }
+
+    if (
+      mode ===
+      'safe'
+    ) {
+      ownerTicketLiveMode =
+        false;
+    }
+
+    return interaction.reply(
+      ephemeral({
+        embeds: [
+          baseEmbed()
+            .setTitle(
+              '⌁ owner ticket test mode',
+            )
+            .setDescription(
+              ownerTicketLiveMode
+                ? '**LIVE** — tickets you open now use normal escalation and can ping real staff. This resets to SAFE whenever the bot restarts.'
+                : '**SAFE** — tickets you open suppress staff escalation pings. This is the default after every restart.',
+            ),
+        ],
+      }),
+    );
+  }
 
   if (
     name ===
