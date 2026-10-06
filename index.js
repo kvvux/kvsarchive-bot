@@ -118,6 +118,9 @@ const CONFIG = {
 
   TICKETS: {
     OPEN_COOLDOWN_MS: 45_000,
+
+    AI_CONTEXT_MESSAGES: 14,
+    AI_MAX_OUTPUT_TOKENS: 650,
   },
 
   LEVELING: {
@@ -407,6 +410,22 @@ db.exec(`
     claimed_by TEXT,
 
     created_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS ticket_ai_state (
+    channel_id TEXT PRIMARY KEY,
+
+    escalation_route TEXT,
+
+    escalation_capability TEXT,
+
+    escalation_target TEXT,
+
+    escalated_at INTEGER,
+
+    last_ai_at INTEGER,
+
+    ai_messages INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS stickies (
@@ -945,6 +964,57 @@ const sql = {
       WHERE channel_id = ?
     `),
 
+  ensureTicketAiState:
+    db.prepare(`
+      INSERT OR IGNORE
+      INTO ticket_ai_state (
+        channel_id
+      )
+
+      VALUES (?)
+    `),
+
+  getTicketAiState:
+    db.prepare(`
+      SELECT *
+      FROM ticket_ai_state
+
+      WHERE channel_id = ?
+    `),
+
+  touchTicketAiState:
+    db.prepare(`
+      UPDATE ticket_ai_state
+
+      SET
+        last_ai_at = ?,
+        ai_messages =
+          ai_messages + 1
+
+      WHERE channel_id = ?
+    `),
+
+  setTicketEscalation:
+    db.prepare(`
+      UPDATE ticket_ai_state
+
+      SET
+        escalation_route = ?,
+        escalation_capability = ?,
+        escalation_target = ?,
+        escalated_at = ?
+
+      WHERE channel_id = ?
+    `),
+
+  deleteTicketAiState:
+    db.prepare(`
+      DELETE
+      FROM ticket_ai_state
+
+      WHERE channel_id = ?
+    `),
+
   getSticky:
     db.prepare(`
       SELECT *
@@ -1159,6 +1229,12 @@ const verificationCooldowns =
   new Map();
 
 const ticketOpenCooldowns =
+  new Map();
+
+const ticketAiLocks =
+  new Set();
+
+const ticketAiPending =
   new Map();
 
 const stickyTimers =
@@ -2245,6 +2321,1220 @@ async function answerGeneratively(
         null,
     );
   }
+}
+
+// ============================================================================
+// AI TICKET HANDLER
+// ============================================================================
+
+const TICKET_ROUTE_PRIORITY = {
+  none: 0,
+  verification: 1,
+  moderation: 1,
+  management: 2,
+  owner: 3,
+};
+
+const TICKET_CAPABILITY_PRIORITY = {
+  none: 0,
+  manage_messages: 1,
+  moderate_members: 2,
+  kick_members: 3,
+  ban_members: 4,
+  manage_roles: 4,
+  manage_guild: 5,
+  owner: 6,
+};
+
+function normalizeTicketRoute(
+  route,
+) {
+  const value =
+    String(
+      route ||
+      '',
+    )
+      .trim()
+      .toLowerCase();
+
+  return Object.prototype
+    .hasOwnProperty
+    .call(
+      TICKET_ROUTE_PRIORITY,
+      value,
+    )
+      ? value
+      : 'none';
+}
+
+function normalizeTicketCapability(
+  capability,
+) {
+  const value =
+    String(
+      capability ||
+      '',
+    )
+      .trim()
+      .toLowerCase();
+
+  return Object.prototype
+    .hasOwnProperty
+    .call(
+      TICKET_CAPABILITY_PRIORITY,
+      value,
+    )
+      ? value
+      : 'none';
+}
+
+function parseTicketAiJson(
+  raw,
+  fallbackRoute = 'none',
+  fallbackCapability = 'none',
+) {
+  const text =
+    String(
+      raw ||
+      '',
+    )
+      .trim();
+
+  let parsed =
+    null;
+
+  const cleaned =
+    text
+      .replace(
+        /^```(?:json)?\s*/i,
+        '',
+      )
+      .replace(
+        /\s*```$/i,
+        '',
+      )
+      .trim();
+
+  const start =
+    cleaned.indexOf(
+      '{',
+    );
+
+  const end =
+    cleaned.lastIndexOf(
+      '}',
+    );
+
+  if (
+    start >=
+      0 &&
+    end >
+      start
+  ) {
+    try {
+      parsed =
+        JSON.parse(
+          cleaned.slice(
+            start,
+            end + 1,
+          ),
+        );
+    } catch {}
+  }
+
+  if (!parsed) {
+    return {
+      reply:
+        truncate(
+          cleaned ||
+          'I could not fully process that request. I can still route it to the right person.',
+          1700,
+        ),
+
+      needs_human:
+        fallbackRoute !==
+        'none',
+
+      route:
+        fallbackRoute,
+
+      capability:
+        fallbackCapability,
+
+      reason:
+        'AI response was not structured.',
+    };
+  }
+
+  const route =
+    normalizeTicketRoute(
+      parsed.route,
+    );
+
+  const capability =
+    normalizeTicketCapability(
+      parsed.capability,
+    );
+
+  return {
+    reply:
+      truncate(
+        parsed.reply ||
+        'I have reviewed the ticket.',
+        1700,
+      ),
+
+    needs_human:
+      Boolean(
+        parsed.needs_human,
+      ) ||
+      route !==
+        'none',
+
+    route:
+      route ===
+        'none' &&
+      parsed.needs_human
+        ? fallbackRoute
+        : route,
+
+    capability:
+      capability ===
+        'none' &&
+      (
+        parsed.needs_human ||
+        route !==
+          'none'
+      )
+        ? fallbackCapability
+        : capability,
+
+    reason:
+      truncate(
+        parsed.reason ||
+        'No escalation reason supplied.',
+        500,
+      ),
+  };
+}
+
+function fallbackTicketRoute(
+  ticket,
+  text,
+) {
+  const lower =
+    String(
+      text ||
+      '',
+    )
+      .toLowerCase();
+
+  if (
+    ticket.type ===
+      'purchase' ||
+    ticket.type ===
+      'owner' ||
+    /\b(purchas|payment|paid|refund|money|role purchase|buy a role|bought a role|donat)/i
+      .test(
+        lower,
+      )
+  ) {
+    return 'owner';
+  }
+
+  if (
+    ticket.type ===
+      'verify' ||
+    /\b(verif|unverified|dm code|verification code|access role)/i
+      .test(
+        lower,
+      )
+  ) {
+    return 'verification';
+  }
+
+  if (
+    ticket.type ===
+      'report' ||
+    /\b(report|harass|threat|spam|scam|ban|kick|timeout|rule break|moderation)/i
+      .test(
+        lower,
+      )
+  ) {
+    return 'moderation';
+  }
+
+  if (
+    /\b(permission|channel setup|role setup|server setup|partnership|partner|staff application problem)/i
+      .test(
+        lower,
+      )
+  ) {
+    return 'management';
+  }
+
+  return 'none';
+}
+
+function fallbackTicketCapability(
+  ticket,
+  text,
+  route,
+) {
+  const lower =
+    String(
+      text ||
+      '',
+    )
+      .toLowerCase();
+
+  if (
+    route ===
+      'owner' ||
+    ticket.type ===
+      'purchase' ||
+    ticket.type ===
+      'owner'
+  ) {
+    return 'owner';
+  }
+
+  if (
+    route ===
+      'verification'
+  ) {
+    return 'manage_roles';
+  }
+
+  if (
+    route ===
+      'management'
+  ) {
+    return 'manage_guild';
+  }
+
+  if (
+    route ===
+    'moderation'
+  ) {
+    if (
+      /\bban|banned|ban request\b/i
+        .test(
+          lower,
+        )
+    ) {
+      return 'ban_members';
+    }
+
+    if (
+      /\bkick|kicked\b/i
+        .test(
+          lower,
+        )
+    ) {
+      return 'kick_members';
+    }
+
+    if (
+      /\btimeout|mute|muted|timeouted\b/i
+        .test(
+          lower,
+        )
+    ) {
+      return 'moderate_members';
+    }
+
+    return 'manage_messages';
+  }
+
+  return 'none';
+}
+
+function ticketServerKnowledge() {
+  return [
+    'kvsarchive support facts:',
+    `- Verification starts in <#${CONFIG.CHANNELS.VERIFY}> and uses a 4-digit DM code that expires after 10 minutes.`,
+    `- If verification fails, users can open Verification Help from <#${CONFIG.CHANNELS.TICKETS}>.`,
+    `- Rules are in <#${CONFIG.CHANNELS.RULES}>.`,
+    `- General chat is <#${CONFIG.CHANNELS.CHAT}> and bot commands are in <#${CONFIG.CHANNELS.CMDS}>.`,
+    '- The server has an expanded PFP/media category with male/female PFPs, GIFs, banners, anime, manga and an anything channel.',
+    '- Private clubs, XP/levels, moderation, counting, media contribution tracking and staff applications are bot-supported systems.',
+    '- Never invent prices, purchase terms, rules, punishments, staff decisions, or private information that is not present in the ticket/context.',
+  ].join(
+    '\n',
+  );
+}
+
+function ticketAiInstructions() {
+  return [
+    'You are stupid assistant acting as the first-line AI support handler inside a PRIVATE kvsarchive support ticket.',
+    'Your job is to solve as much as you safely can before bothering human staff.',
+    'Be concise, practical, calm, and conversational.',
+    'You may explain server systems, commands, troubleshooting steps, and what information the user should provide.',
+    'Never pretend you performed a human/admin action. Never claim you verified someone, changed a role, refunded money, punished a user, approved a purchase, or changed server settings unless the bot actually did it.',
+    'If the request can be answered with information/troubleshooting, needs_human should be false and route should be none.',
+    'If a human action is required, choose exactly one route:',
+    '- verification: manual verification, role assignment/removal, or access-role fixes.',
+    '- moderation: reports, investigations, warnings, timeouts, kicks, bans, or rule enforcement.',
+    '- management: server/channel/permission/configuration matters that need higher staff.',
+    '- owner: purchases, paid roles, refunds, money, ownership-only requests, or anything explicitly requiring the server owner.',
+    'Also choose the minimum capability the human needs: none, manage_roles, manage_messages, moderate_members, kick_members, ban_members, manage_guild, or owner.',
+    'Examples: manual verification -> verification + manage_roles; timeout -> moderation + moderate_members; kick -> moderation + kick_members; ban -> moderation + ban_members; normal report review -> moderation + manage_messages; server configuration -> management + manage_guild; paid role/refund -> owner + owner.',
+    'If test_mode is true, respond as if testing the workflow but ALWAYS output route none, capability none, and needs_human false. Never request or imply a staff ping.',
+    'Return ONLY valid JSON. No markdown fence.',
+    'Schema: {"reply":"message for the ticket opener","needs_human":false,"route":"none","capability":"none","reason":"short internal reason"}',
+  ].join(
+    ' ',
+  );
+}
+
+function roleCanHandleTicketCapability(
+  role,
+  capability,
+  guild,
+) {
+  if (
+    !role ||
+    role.managed
+  ) {
+    return false;
+  }
+
+  if (
+    role.permissions
+      .has(
+        PermissionFlagsBits
+          .Administrator,
+      )
+  ) {
+    return true;
+  }
+
+  if (
+    capability ===
+    'manage_roles'
+  ) {
+    const verifyRole =
+      guild.roles.cache
+        .get(
+          CONFIG.ROLES.VERIFY,
+        );
+
+    const memberRole =
+      guild.roles.cache
+        .get(
+          CONFIG.ROLES.MEMBER,
+        );
+
+    const highestTarget =
+      Math.max(
+        verifyRole
+          ?.position ||
+          0,
+        memberRole
+          ?.position ||
+          0,
+      );
+
+    return (
+      role.permissions
+        .has(
+          PermissionFlagsBits
+            .ManageRoles,
+        ) &&
+      role.position >
+        highestTarget
+    );
+  }
+
+  const requiredPermission = {
+    manage_messages:
+      PermissionFlagsBits
+        .ManageMessages,
+
+    moderate_members:
+      PermissionFlagsBits
+        .ModerateMembers,
+
+    kick_members:
+      PermissionFlagsBits
+        .KickMembers,
+
+    ban_members:
+      PermissionFlagsBits
+        .BanMembers,
+
+    manage_guild:
+      PermissionFlagsBits
+        .ManageGuild,
+  }[
+    capability
+  ];
+
+  return Boolean(
+    requiredPermission &&
+    role.permissions
+      .has(
+        requiredPermission,
+      ),
+  );
+}
+
+async function findTicketEscalationTarget(
+  guild,
+  route,
+  capability,
+) {
+  if (
+    route ===
+    'owner'
+  ) {
+    return {
+      kind:
+        'user',
+
+      id:
+        CONFIG.OWNER_IDS[
+          0
+        ],
+
+      label:
+        'owner',
+    };
+  }
+
+  await guild.members
+    .fetch()
+    .catch(
+      () =>
+        null,
+    );
+
+  const candidates =
+    [
+      CONFIG.ROLES.MOD,
+      CONFIG.ROLES.SR_MOD,
+      CONFIG.ROLES.ADMIN,
+      CONFIG.ROLES.MANAGEMENT,
+    ]
+      .map(
+        (id) =>
+          guild.roles.cache
+            .get(
+              id,
+            ),
+      )
+      .filter(
+        Boolean,
+      )
+      .filter(
+        (role) =>
+          role.members.size >
+            0 &&
+          roleCanHandleTicketCapability(
+            role,
+            capability,
+            guild,
+          ),
+      )
+      .sort(
+        (
+          a,
+          b,
+        ) =>
+          a.position -
+          b.position,
+      );
+
+  if (
+    candidates.length
+  ) {
+    const chosen =
+      candidates[
+        0
+      ];
+
+    const botCanMentionRoles =
+      guild.members.me
+        ?.permissions
+        .has(
+          PermissionFlagsBits
+            .MentionEveryone,
+        ) ||
+      false;
+
+    if (
+      chosen.mentionable ||
+      botCanMentionRoles
+    ) {
+      return {
+        kind:
+          'role',
+
+        id:
+          chosen.id,
+
+        label:
+          chosen.name,
+      };
+    }
+
+    const humans =
+      chosen.members
+        .filter(
+          (member) =>
+            !member.user.bot,
+        );
+
+    const human =
+      humans
+        .filter(
+          (member) =>
+            !isOwner(
+              member.id,
+            ),
+        )
+        .first() ||
+      humans.first();
+
+    if (human) {
+      return {
+        kind:
+          'user',
+
+        id:
+          human.id,
+
+        label:
+          `${human.user.tag} (${chosen.name})`,
+      };
+    }
+  }
+
+  return {
+    kind:
+      'user',
+
+    id:
+      CONFIG.OWNER_IDS[
+        0
+      ],
+
+    label:
+      'owner fallback',
+  };
+}
+
+async function escalateTicket(
+  channel,
+  ticket,
+  route,
+  capability,
+  reason,
+) {
+  const normalized =
+    normalizeTicketRoute(
+      route,
+    );
+
+  const normalizedCapability =
+    normalizeTicketCapability(
+      capability,
+    );
+
+  if (
+    normalized ===
+      'none' ||
+    isOwner(
+      ticket.opener_id,
+    )
+  ) {
+    return false;
+  }
+
+  sql.ensureTicketAiState.run(
+    channel.id,
+  );
+
+  const state =
+    sql.getTicketAiState.get(
+      channel.id,
+    );
+
+  const currentRoute =
+    normalizeTicketRoute(
+      state
+        ?.escalation_route,
+    );
+
+  const currentCapability =
+    normalizeTicketCapability(
+      state
+        ?.escalation_capability,
+    );
+
+  const currentRoutePriority =
+    TICKET_ROUTE_PRIORITY[
+      currentRoute
+    ] ||
+    0;
+
+  const nextRoutePriority =
+    TICKET_ROUTE_PRIORITY[
+      normalized
+    ] ||
+    0;
+
+  const currentCapabilityPriority =
+    TICKET_CAPABILITY_PRIORITY[
+      currentCapability
+    ] ||
+    0;
+
+  const nextCapabilityPriority =
+    TICKET_CAPABILITY_PRIORITY[
+      normalizedCapability
+    ] ||
+    0;
+
+  if (
+    currentRoute ===
+      normalized &&
+    currentCapabilityPriority >=
+      nextCapabilityPriority
+  ) {
+    return false;
+  }
+
+  if (
+    currentRoute !==
+      normalized &&
+    currentRoutePriority >
+      nextRoutePriority
+  ) {
+    return false;
+  }
+
+  const target =
+    await findTicketEscalationTarget(
+      channel.guild,
+      normalized,
+      normalizedCapability,
+    );
+
+  const mention =
+    target.kind ===
+      'role'
+      ? `<@&${target.id}>`
+      : `<@${target.id}>`;
+
+  const allowedMentions =
+    target.kind ===
+      'role'
+      ? {
+          roles: [
+            target.id,
+          ],
+        }
+      : {
+          users: [
+            target.id,
+          ],
+        };
+
+  await channel.send({
+    content:
+      mention,
+
+    allowedMentions,
+
+    embeds: [
+      baseEmbed()
+        .setTitle(
+          '⌁ human escalation',
+        )
+        .setDescription(
+          [
+            `AI support needs **${target.label}** for this ticket.`,
+            '',
+            `**route:** ${normalized}`,
+            `**required capability:** ${normalizedCapability}`,
+            `**reason:** ${truncate(reason, 700)}`,
+          ].join(
+            '\n',
+          ),
+        ),
+    ],
+  });
+
+  sql.setTicketEscalation.run(
+    normalized,
+    normalizedCapability,
+    `${target.kind}:${target.id}`,
+    Date.now(),
+    channel.id,
+  );
+
+  await logEvent(
+    'ticket escalated',
+    `<#${channel.id}> → ${normalized} / ${normalizedCapability} → ${target.label}`,
+    [
+      {
+        name:
+          'reason',
+
+        value:
+          truncate(
+            reason,
+            1000,
+          ),
+      },
+    ],
+  );
+
+  return true;
+}
+
+async function runTicketAi(
+  channel,
+  ticket,
+  opener,
+  requestText,
+  sourceMessage = null,
+) {
+  if (
+    !channel
+      ?.isTextBased()
+  ) {
+    return;
+  }
+
+  if (
+    ticketAiLocks
+      .has(
+        channel.id,
+      )
+  ) {
+    ticketAiPending.set(
+      channel.id,
+      {
+        channel,
+        ticket,
+        opener,
+        requestText,
+        sourceMessage,
+      },
+    );
+
+    return;
+  }
+
+  const freshTicket =
+    sql.getTicket.get(
+      channel.id,
+    );
+
+  if (
+    !freshTicket ||
+    freshTicket.claimed_by
+  ) {
+    return;
+  }
+
+  ticketAiLocks.add(
+    channel.id,
+  );
+
+  sql.ensureTicketAiState.run(
+    channel.id,
+  );
+
+  try {
+    await channel
+      .sendTyping()
+      .catch(
+        () =>
+          null,
+      );
+
+    const testMode =
+      isOwner(
+        ticket.opener_id,
+      );
+
+    const context =
+      await buildRecentContext(
+        channel,
+        CONFIG.TICKETS
+          .AI_CONTEXT_MESSAGES,
+      );
+
+    const fallbackRoute =
+      testMode
+        ? 'none'
+        : fallbackTicketRoute(
+            ticket,
+            requestText,
+          );
+
+    const fallbackCapability =
+      testMode
+        ? 'none'
+        : fallbackTicketCapability(
+            ticket,
+            requestText,
+            fallbackRoute,
+          );
+
+    let decision;
+
+    if (
+      !process.env
+        .OPENAI_API_KEY
+    ) {
+      const unavailableRoute =
+        testMode
+          ? 'none'
+          : (
+            fallbackRoute ===
+              'none'
+              ? 'moderation'
+              : fallbackRoute
+          );
+
+      decision = {
+        reply:
+          testMode
+            ? 'The AI support service is currently unavailable. This owner test will not ping staff.'
+            : 'The AI support service is temporarily unavailable, so I am routing this to a human instead of leaving the ticket unanswered.',
+
+        needs_human:
+          unavailableRoute !==
+          'none',
+
+        route:
+          unavailableRoute,
+
+        capability:
+          fallbackTicketCapability(
+            ticket,
+            requestText,
+            unavailableRoute,
+          ),
+
+        reason:
+          'AI support unavailable.',
+      };
+    } else {
+      const raw =
+        await generateAI({
+          instructions:
+            ticketAiInstructions(),
+
+          input: [
+            ticketServerKnowledge(),
+            '',
+            `ticket_type: ${ticket.type}`,
+            `ticket_opener: ${opener.user.tag} (${opener.id})`,
+            `test_mode: ${testMode}`,
+            '',
+            'recent_ticket_context:',
+            context ||
+              '[no prior messages]',
+            '',
+            'current_request:',
+            requestText,
+          ].join(
+            '\n',
+          ),
+
+          maxOutputTokens:
+            CONFIG.TICKETS
+              .AI_MAX_OUTPUT_TOKENS,
+        });
+
+      decision =
+        parseTicketAiJson(
+          raw,
+          fallbackRoute,
+          fallbackCapability,
+        );
+    }
+
+    if (testMode) {
+      decision.needs_human =
+        false;
+
+      decision.route =
+        'none';
+
+      decision.capability =
+        'none';
+    } else if (
+      ticket.type ===
+        'purchase' ||
+      ticket.type ===
+        'owner'
+    ) {
+      decision.needs_human =
+        true;
+
+      decision.route =
+        'owner';
+
+      decision.capability =
+        'owner';
+    } else if (
+      ticket.type ===
+      'report'
+    ) {
+      decision.needs_human =
+        true;
+
+      decision.route =
+        'moderation';
+
+      if (
+        ![
+          'manage_messages',
+          'moderate_members',
+          'kick_members',
+          'ban_members',
+        ].includes(
+          normalizeTicketCapability(
+            decision.capability,
+          ),
+        )
+      ) {
+        decision.capability =
+          'manage_messages';
+      }
+    }
+
+    const latestTicket =
+      sql.getTicket.get(
+        channel.id,
+      );
+
+    if (
+      !latestTicket ||
+      latestTicket.claimed_by ||
+      channel.name
+        .startsWith(
+          'closed-',
+        )
+    ) {
+      return;
+    }
+
+    const replyText =
+      testMode
+        ? `**owner test mode** — escalation pings are suppressed.\n\n${decision.reply}`
+        : decision.reply;
+
+    if (
+      sourceMessage
+    ) {
+      await sourceMessage.reply({
+        content:
+          truncate(
+            replyText,
+            1900,
+          ),
+
+        allowedMentions: {
+          repliedUser:
+            false,
+
+          parse: [],
+        },
+      });
+    } else {
+      await channel.send({
+        content:
+          truncate(
+            replyText,
+            1900,
+          ),
+
+        allowedMentions: {
+          parse: [],
+        },
+      });
+    }
+
+    sql.touchTicketAiState.run(
+      Date.now(),
+      channel.id,
+    );
+
+    if (
+      decision.needs_human &&
+      decision.route !==
+        'none'
+    ) {
+      await escalateTicket(
+        channel,
+        ticket,
+        decision.route,
+        decision.capability,
+        decision.reason,
+      );
+    }
+  } catch (
+    error
+  ) {
+    console.error(
+      '[ticket-ai]',
+      error,
+    );
+
+    const fallbackRoute =
+      isOwner(
+        ticket.opener_id,
+      )
+        ? 'none'
+        : (
+          fallbackTicketRoute(
+            ticket,
+            requestText,
+          ) ||
+          'moderation'
+        );
+
+    const errorRoute =
+      isOwner(
+        ticket.opener_id,
+      )
+        ? 'none'
+        : (
+          fallbackRoute ===
+            'none'
+            ? 'moderation'
+            : fallbackRoute
+        );
+
+    await channel.send({
+      content:
+        'AI support hit an error while processing this. I will not pretend it succeeded.',
+
+      allowedMentions: {
+        parse: [],
+      },
+    }).catch(
+      () =>
+        null,
+    );
+
+    if (
+      errorRoute !==
+      'none'
+    ) {
+      await escalateTicket(
+        channel,
+        ticket,
+        errorRoute,
+        fallbackTicketCapability(
+          ticket,
+          requestText,
+          errorRoute,
+        ),
+        `AI support error: ${truncate(error.message, 500)}`,
+      ).catch(
+        () =>
+          null,
+      );
+    }
+  } finally {
+    ticketAiLocks.delete(
+      channel.id,
+    );
+
+    const pending =
+      ticketAiPending.get(
+        channel.id,
+      );
+
+    if (pending) {
+      ticketAiPending.delete(
+        channel.id,
+      );
+
+      setTimeout(
+        () =>
+          runTicketAi(
+            pending.channel,
+            pending.ticket,
+            pending.opener,
+            pending.requestText,
+            pending.sourceMessage,
+          ).catch(
+            (error) =>
+              console.error(
+                '[ticket-ai-pending]',
+                error,
+              ),
+          ),
+        500,
+      ).unref();
+    }
+  }
+}
+
+async function handleTicketAiMessage(
+  message,
+  ticket,
+) {
+  if (
+    message.author.id !==
+      ticket.opener_id ||
+    ticket.claimed_by
+  ) {
+    return false;
+  }
+
+  const opener =
+    message.member ||
+    await message.guild.members
+      .fetch(
+        ticket.opener_id,
+      )
+      .catch(
+        () =>
+          null,
+      );
+
+  if (!opener) {
+    return false;
+  }
+
+  const requestText =
+    [
+      message.content
+        ?.trim(),
+      ...message.attachments
+        .map(
+          (attachment) =>
+            `attachment: ${attachment.url}`,
+        ),
+    ]
+      .filter(
+        Boolean,
+      )
+      .join(
+        '\n',
+      ) ||
+    '[attachment or empty message]';
+
+  await runTicketAi(
+    message.channel,
+    ticket,
+    opener,
+    requestText,
+    message,
+  );
+
+  return true;
 }
 
 // ============================================================================
@@ -3759,22 +5049,21 @@ function ticketPanel() {
         )
         .setDescription(
           [
-            '**Need staff? Open the right ticket below.**',
+            '**Open the ticket that best matches what you need.**',
             '',
-            '**Verification Help**',
-            'Cannot verify, DMs are blocked, or the verification flow is broken? Open this even before you are verified.',
+            '**AI support responds first** and will try to solve the issue without bothering staff.',
+            'If an actual staff action is required, it automatically escalates to the lowest appropriate staff level that can handle it.',
             '',
-            '**Member Report**',
-            'Report a member, behaviour issue, or server incident.',
+            '**Verification Help** — DM/code/access problems.',
+            '**General Support** — server questions, roles, commands, or technical help.',
+            '**Member Report** — member behaviour, incidents, or moderation reports.',
+            '**Purchase / Role** — paid roles, purchases, payment/refund questions.',
+            '**Owner Request** — something specifically for ownership.',
             '',
-            '**General Support**',
-            'Questions, server help, role problems, or anything you need staff for.',
-            '',
-            '**Owner Request**',
-            'Something specifically intended for ownership / higher staff.',
-            '',
-            'Tickets are private. Other normal members cannot see them.',
-          ].join('\n'),
+            'Tickets are private. Claiming a ticket hands it to staff and stops automatic AI replies.',
+          ].join(
+            '\n',
+          ),
         ),
     ],
 
@@ -3794,6 +5083,17 @@ function ticketPanel() {
 
           new ButtonBuilder()
             .setCustomId(
+              'ticket_support',
+            )
+            .setLabel(
+              'General Support',
+            )
+            .setStyle(
+              ButtonStyle.Secondary,
+            ),
+
+          new ButtonBuilder()
+            .setCustomId(
               'ticket_report',
             )
             .setLabel(
@@ -3805,13 +5105,13 @@ function ticketPanel() {
 
           new ButtonBuilder()
             .setCustomId(
-              'ticket_support',
+              'ticket_purchase',
             )
             .setLabel(
-              'General Support',
+              'Purchase / Role',
             )
             .setStyle(
-              ButtonStyle.Secondary,
+              ButtonStyle.Primary,
             ),
 
           new ButtonBuilder()
@@ -4101,15 +5401,23 @@ function ticketModal(
     type ===
     'verify';
 
+  const isPurchase =
+    type ===
+    'purchase';
+
   return modal
     .setTitle(
       isVerify
         ? 'verification help'
         : (
-          type ===
-            'owner'
-            ? 'owner request'
-            : 'general support'
+          isPurchase
+            ? 'purchase / role support'
+            : (
+              type ===
+                'owner'
+                ? 'owner request'
+                : 'general support'
+            )
         ),
     )
     .addComponents(
@@ -4122,7 +5430,11 @@ function ticketModal(
             .setLabel(
               isVerify
                 ? 'what part of verification failed?'
-                : 'short subject',
+                : (
+                  isPurchase
+                    ? 'what purchase / role is this about?'
+                    : 'short subject'
+                ),
             )
             .setStyle(
               TextInputStyle.Short,
@@ -4143,12 +5455,16 @@ function ticketModal(
             )
             .setLabel(
               isVerify
-                ? 'tell staff what happened'
+                ? 'tell us what happened'
                 : (
-                  type ===
-                    'owner'
-                    ? 'request / reason'
-                    : 'what do you need help with?'
+                  isPurchase
+                    ? 'purchase details / what do you need?'
+                    : (
+                      type ===
+                        'owner'
+                        ? 'request / reason'
+                        : 'what do you need help with?'
+                    )
                 ),
             )
             .setStyle(
@@ -4489,6 +5805,10 @@ async function createTicketChannel(
     sql.deleteTicket.run(
       existing.channel_id,
     );
+
+    sql.deleteTicketAiState.run(
+      existing.channel_id,
+    );
   }
 
   const ticketWait =
@@ -4698,6 +6018,9 @@ async function createTicketChannel(
     support:
       'General Support',
 
+    purchase:
+      'Purchase / Role',
+
     owner:
       'Owner Request',
 
@@ -4714,9 +6037,17 @@ async function createTicketChannel(
         [
           `${opener}, your ticket is open.`,
           '',
-          '**A staff member will respond here.**',
-          'Please keep everything related to this issue in this channel.',
-        ].join('\n'),
+          isOwner(
+            opener.id,
+          )
+            ? '**Owner test mode is active.** AI will respond normally, but staff escalation pings are suppressed.'
+            : '**AI support will respond first.** If the issue needs a real staff action, the bot will escalate it automatically.',
+          '',
+          'Keep everything related to this issue in this channel.',
+          'If a staff member claims the ticket, automatic AI replies stop.',
+        ].join(
+          '\n',
+        ),
       )
       .addFields(
         {
@@ -4754,17 +6085,14 @@ async function createTicketChannel(
 
   await channel.send({
     content:
-      `${opener} <@&${CONFIG.ROLES.MOD}> <@&${CONFIG.ROLES.SR_MOD}>`,
+      `${opener}`,
 
     allowedMentions: {
       users: [
         opener.id,
       ],
 
-      roles: [
-        CONFIG.ROLES.MOD,
-        CONFIG.ROLES.SR_MOD,
-      ],
+      roles: [],
     },
 
     embeds: [
@@ -4788,6 +6116,45 @@ async function createTicketChannel(
   await logEvent(
     'ticket opened',
     `${opener.user.tag} opened a **${type}** ticket: ${channel}.`,
+  );
+
+  const initialRequest =
+    [
+      `subject: ${subject}`,
+      `details: ${details}`,
+      evidence
+        ? `evidence: ${evidence}`
+        : null,
+    ]
+      .filter(
+        Boolean,
+      )
+      .join(
+        '\n',
+      );
+
+  runTicketAi(
+    channel,
+    {
+      channel_id:
+        channel.id,
+
+      opener_id:
+        opener.id,
+
+      type,
+
+      claimed_by:
+        null,
+    },
+    opener,
+    initialRequest,
+  ).catch(
+    (error) =>
+      console.error(
+        '[ticket-ai-initial]',
+        error,
+      ),
   );
 }
 
@@ -4856,6 +6223,7 @@ async function handleTicketButton(
       'verify',
       'report',
       'support',
+      'purchase',
       'owner',
     ].includes(
       action,
@@ -4962,6 +6330,52 @@ async function handleTicketButton(
       );
     }
 
+    const targetRolePosition =
+      Math.max(
+        interaction.guild.roles.cache
+          .get(
+            CONFIG.ROLES.VERIFY,
+          )
+          ?.position ||
+          0,
+
+        interaction.guild.roles.cache
+          .get(
+            CONFIG.ROLES.MEMBER,
+          )
+          ?.position ||
+          0,
+      );
+
+    const canManageVerification =
+      isOwner(
+        member.id,
+      ) ||
+      (
+        member.permissions
+          .has(
+            PermissionFlagsBits
+              .ManageRoles,
+          ) &&
+        member.roles.highest
+          .position >
+          targetRolePosition
+      );
+
+    if (
+      !canManageVerification
+    ) {
+      return interaction.reply(
+        ephemeral({
+          embeds: [
+            errorEmbed(
+              'you can view this ticket, but your staff role does not have enough role-management permission to manually verify this member.',
+            ),
+          ],
+        }),
+      );
+    }
+
     sql.deleteVerifyCode.run(
       opener.id,
     );
@@ -5052,7 +6466,7 @@ async function handleTicketButton(
       embeds: [
         successEmbed(
           'ticket claimed',
-          `claimed by ${member}.`,
+          `claimed by ${member}. Automatic AI replies are now paused for this ticket.`,
         ),
       ],
     });
@@ -5198,6 +6612,10 @@ async function handleTicketButton(
       );
 
     sql.deleteTicket.run(
+      interaction.channelId,
+    );
+
+    sql.deleteTicketAiState.run(
       interaction.channelId,
     );
 
@@ -8173,8 +9591,8 @@ async function doctorReport(
   lines.push(
     process.env
       .OPENAI_API_KEY
-      ? `✅ generative AI configured — \`${CONFIG.AI.MODEL}\``
-      : '❌ OPENAI_API_KEY is missing — /ask and AI staff review will not be generative',
+      ? `✅ generative AI configured — \`${CONFIG.AI.MODEL}\` — AI ticket support active`
+      : '⚠️ OPENAI_API_KEY is missing — /ask is unavailable and tickets will fall back directly to human routing',
   );
 
   const category =
@@ -8464,6 +9882,60 @@ async function doctorReport(
     );
   }
 
+  try {
+    const routeChecks = [
+      [
+        'verification',
+        'manage_roles',
+      ],
+      [
+        'moderation',
+        'manage_messages',
+      ],
+      [
+        'moderation',
+        'moderate_members',
+      ],
+      [
+        'moderation',
+        'ban_members',
+      ],
+      [
+        'management',
+        'manage_guild',
+      ],
+      [
+        'owner',
+        'owner',
+      ],
+    ];
+
+    for (
+      const [
+        route,
+        capability,
+      ]
+      of routeChecks
+    ) {
+      const target =
+        await findTicketEscalationTarget(
+          guild,
+          route,
+          capability,
+        );
+
+      lines.push(
+        `✅ ticket route ${route}/${capability} → ${target.kind === 'role' ? '@' : ''}${target.label} (${target.id})`,
+      );
+    }
+  } catch (
+    error
+  ) {
+    lines.push(
+      `⚠️ ticket escalation routing diagnostic failed: ${truncate(error.message, 500)}`,
+    );
+  }
+
   return lines;
 }
 
@@ -8477,6 +9949,49 @@ async function postPanel(
       guild,
       id,
     );
+
+  const panelTitle =
+    payload.embeds?.[
+      0
+    ]?.data?.title ||
+    null;
+
+  if (
+    panelTitle &&
+    channel.messages
+      ?.fetch
+  ) {
+    const recent =
+      await channel.messages
+        .fetch({
+          limit:
+            50,
+        })
+        .catch(
+          () =>
+            null,
+        );
+
+    const existing =
+      recent
+        ?.find(
+          (message) =>
+            message.author.id ===
+              client.user.id &&
+            message.embeds?.[
+              0
+            ]?.title ===
+              panelTitle,
+        );
+
+    if (existing) {
+      await existing.edit(
+        payload,
+      );
+
+      return channel;
+    }
+  }
 
   await channel.send(
     payload,
@@ -8631,10 +10146,6 @@ const commands = [
   new SlashCommandBuilder()
     .setName('report')
     .setDescription('open a private member report ticket'),
-
-  new SlashCommandBuilder()
-    .setName('verifyhelp')
-    .setDescription('get staff help with verification'),
 
   new SlashCommandBuilder()
     .setName('roleinfo')
@@ -9384,6 +10895,10 @@ async function reconcilePersistentState(
         row.channel_id,
       );
 
+      sql.deleteTicketAiState.run(
+        row.channel_id,
+      );
+
       staleTickets++;
     }
   }
@@ -10068,6 +11583,29 @@ client.on(
         return;
       }
 
+      const ticket =
+        sql.getTicket.get(
+          message.channelId,
+        );
+
+      if (ticket) {
+        if (
+          await handleAutomod(
+            message,
+            member,
+          )
+        ) {
+          return;
+        }
+
+        await handleTicketAiMessage(
+          message,
+          ticket,
+        );
+
+        return;
+      }
+
       const isPfp =
         message.channelId ===
         CONFIG.CHANNELS.PFP;
@@ -10340,6 +11878,14 @@ client.on(
       sql.deleteTicket.run(
         channel.id,
       );
+
+      sql.deleteTicketAiState.run(
+        channel.id,
+      );
+
+      ticketAiPending.delete(
+        channel.id,
+      );
     }
 
     if (
@@ -10607,7 +12153,7 @@ async function handleSlashCommand(
     const lines = [
       '**community**',
 
-      '`/ask` `/level` `/leaderboard` `/mediastats` `/avatar` `/banner` `/userinfo` `/serverinfo` `/roleinfo` `/username`\n\n`/support` `/report` `/verifyhelp`',
+      '`/ask` `/level` `/leaderboard` `/mediastats` `/avatar` `/banner` `/userinfo` `/serverinfo` `/roleinfo` `/username`\n\n`/support` `/report`',
 
       '`/pickup` `/ping` `/uptime`',
 
@@ -11467,17 +13013,6 @@ async function handleSlashCommand(
     return interaction.showModal(
       ticketModal(
         'report',
-      ),
-    );
-  }
-
-  if (
-    name ===
-    'verifyhelp'
-  ) {
-    return interaction.showModal(
-      ticketModal(
-        'verify',
       ),
     );
   }

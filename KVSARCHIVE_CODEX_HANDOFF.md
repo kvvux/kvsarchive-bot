@@ -137,3 +137,21 @@ Prioritize:
 - community features that members actually use
 - consistent archive visual style
 - safe configuration and deployment
+
+## AI-first ticket handler
+
+The current support design is AI-first rather than immediate staff pinging.
+
+- The bot replies to the ticket opener automatically while the ticket is unclaimed.
+- Claiming a ticket pauses automatic AI replies.
+- Verification troubleshooting can stay AI-only until a real role/manual-verification action is required.
+- Human escalation is permission-aware and prefers the lowest active staff role that can actually perform the requested action.
+- Member reports force moderation escalation.
+- Purchase / Role and Owner Request tickets force owner escalation.
+- If AI is unavailable, the bot falls back to human escalation instead of silently stranding a support ticket.
+- Owner-opened tickets are test mode: no staff escalation pings; only the owner is mentioned.
+- Manual verification is guarded so staff without sufficient Manage Roles/hierarchy cannot use the bot as a privilege bypass.
+- `/verifyhelp` was removed; verification help is intentionally accessed from the ticket panel visible to unverified members.
+- `/setup tickets` should refresh an existing matching panel instead of creating needless duplicates.
+
+When changing routing, preserve the distinction between answering questions and performing privileged actions. AI may explain/troubleshoot, but it must never claim to have performed staff/admin actions it did not actually execute.
