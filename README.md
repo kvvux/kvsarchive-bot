@@ -50,3 +50,20 @@ After structural changes, run `/archive-server` and keep the generated map as th
 ## Development
 
 The current production bot is still largely implemented in `index.js`. Major refactors should preserve behaviour and database compatibility. See `KVSARCHIVE_CODEX_HANDOFF.md`.
+
+## AI ticket support
+
+Support tickets are AI-first. The bot attempts to answer/troubleshoot before escalating.
+
+Routing rules:
+- verification actions -> lowest active staff role with sufficient role-management permission
+- moderation reports/actions -> lowest active moderation-capable staff role
+- management/configuration issues -> management-capable staff
+- purchases, paid roles, refunds, money, or ownership-only requests -> server owner
+- tickets opened by the configured owner run in **owner test mode**: AI replies work, but staff escalation pings are suppressed
+
+The ticket panel includes Verification Help, General Support, Member Report, Purchase / Role, and Owner Request. Claiming a ticket pauses automatic AI replies so a human can take over cleanly.
+
+The old `/verifyhelp` shortcut has been removed; verification support should start from the visible ticket panel.
+
+Running `/setup tickets` refreshes the existing support panel message when possible instead of blindly posting a duplicate.
