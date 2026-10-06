@@ -2879,13 +2879,23 @@ async function findTicketEscalationTarget(
       };
     }
 
-    const human =
+    const humans =
       chosen.members
         .filter(
           (member) =>
             !member.user.bot,
+        );
+
+    const human =
+      humans
+        .filter(
+          (member) =>
+            !isOwner(
+              member.id,
+            ),
         )
-        .first();
+        .first() ||
+      humans.first();
 
     if (human) {
       return {
